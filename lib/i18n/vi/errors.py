@@ -231,6 +231,11 @@ MESSAGES = {
         "Endpoint {endpoint} của mô hình {model_id} không hỗ trợ cấu hình workflow ghi đè ComfyUI"
     ),
     "comfyui_workflow_invalid": "Workflow ghi đè ComfyUI của mô hình {model_id} không hợp lệ: {reason}",
+    "comfyui_connection_invalid_url": "Địa chỉ máy chủ ComfyUI không hợp lệ: {err_msg}",
+    "comfyui_connection_no_host": "Chưa cấu hình địa chỉ máy chủ ComfyUI",
+    "comfyui_connection_success": "Kết nối ComfyUI thành công, {node_count} máy chủ truy cập được",
+    "comfyui_connection_partial": "ComfyUI chỉ truy cập được một phần ({reachable_count}/{total_count} máy chủ)",
+    "comfyui_connection_failed": "Không thể truy cập máy chủ ComfyUI nào",
     "capability_override_last_frame_unsupported": (
         "Endpoint {endpoint} của mô hình {model_id} không hỗ trợ tạo khung hình cuối; "
         "không thể ghi đè last_frame thành true"
