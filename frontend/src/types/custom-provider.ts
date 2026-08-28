@@ -140,6 +140,29 @@ export interface CustomProviderCredentials {
   api_key: string;
 }
 
+/** ComfyUI 主机连通性测试的单节点结果（GET /system_stats 成功即视为可达）。 */
+export interface ComfyUINodeTestResult {
+  base_url: string;
+  reachable: boolean;
+  /** /system_stats 的设备信息；不可达时为 null。 */
+  device: string | null;
+  /** /system_stats 的 ComfyUI 版本；不可达时为 null。 */
+  version: string | null;
+  /** /queue 的 running 数；不可达或 /queue 探测失败时为 null。 */
+  running: number | null;
+  /** /queue 的 pending 数；不可达或 /queue 探测失败时为 null。 */
+  pending: number | null;
+  /** 探测失败原因；可达时为 null。 */
+  error: string | null;
+}
+
+/** ComfyUI 供应商连通性测试结果：每个 base_url（主机）一条状态。 */
+export interface ComfyUIConnectionTestResult {
+  success: boolean;
+  message: string;
+  nodes: ComfyUINodeTestResult[];
+}
+
 export interface AnthropicDiscoverRequest {
   base_url?: string;
   api_key?: string;
