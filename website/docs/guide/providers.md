@@ -335,6 +335,67 @@ ArcReel 可以接入 OpenAI 兼容或 Google 兼容服务。典型用途：
 6. TTS；
 7. 错误码和限流行为。
 
+### 10.1 ComfyUI 本地视频生成 {#comfyui-video}
+
+ComfyUI 是自托管的开源节点式 AI 生成工作台。ArcReel 通过它的 HTTP API 提交 MiniMax H3
+视频工作流并取回成片，视频生成完全发生在你自己的机器上，不经过第三方服务。
+
+#### 前提 {#comfyui-prerequisites}
+
+- 一台能运行 MiniMax H3 工作流的 ComfyUI 实例，且可从 ArcReel 所在主机访问；
+- 已安装 MiniMax H3 工作流所需的模型文件与自定义节点，包括 `MiniMaxH3ReferenceToVideo`、
+  `SaveVideo`、`CreateVideo`、`LoadVideo`、`GetVideoComponents`、`LoadAudio` 等；
+- 工作流通过 ComfyUI 的 API-format 导出（设置页的「启用 Dev mode」+「Save (API Format)」），
+  而不是默认的 UI 格式。
+
+#### 配置步骤 {#comfyui-configuration-steps}
+
+在设置页添加一个自定义供应商：
+
+- **Base URL**：ComfyUI 地址，如 `http://localhost:8188`；
+- **API Key**：可留空（本地无鉴权）；若 ComfyUI 前面挂了带鉴权的反向代理，填代理要求的
+  Bearer Token；
+- **模型**：选择调用端点 `comfyui-video`，并选择三个内置模型之一，或自定义一个模型名并粘贴
+  覆盖工作流。
+
+三个内置模型对应三个内置工作流模板：
+
+| 模型 | 模板 |
+|---|---|
+| `minimax-h3-ref2va` | 标准 20 步 Ref2VA |
+| `minimax-h3-ref2va-8step` | 8 步 Turbo LoRA（INT8 UNet） |
+| `minimax-h3-ref2va-8step-fp8` | 8 步 Turbo LoRA（FP8 UNet） |
+
+自定义模型需要粘贴一份 **API-format 工作流 JSON** 作为覆盖模板。覆盖模板必须同时包含
+`MiniMaxH3ReferenceToVideo` 与 `SaveVideo` 节点，且不能与三个内置模型重名；ArcReel 只在
+提交时注入提示词、分辨率、时长帧数、seed 和参考素材，不改动图结构。
+
+#### 参考素材与时长 {#comfyui-reference-media-and-duration}
+
+- 参考图：1–9 张（首帧图按参考图并入同一组）；
+- 参考音频：最多 3 段，按音色参考直传；
+- 时长：5–15 秒（帧数按 MiniMax H3 的 `17n+5` 约束对齐）。
+
+#### 多主机池 {#comfyui-multi-host-pool}
+
+可以配置多台 ComfyUI 主机组成一个池。**每台主机就是一个自定义供应商**，各自的
+`video_max_workers` 决定它在池容量中的权重，池的并发上限是所有主机 `video_max_workers`
+之和。
+
+- 提交任务时，ArcReel 的调度器按健康检查选**最空闲**的主机；
+- 每台主机同时在途任务不超过 2 个（1 个执行 + 1 个等待），满载时任务保持排队，不会向
+  ComfyUI 无限提交；
+- 同一台主机的两次提交至少间隔 8 秒；
+- 在设置页可以对每台主机做**连通性测试**（后端代理探测 `/system_stats` 与 `/queue`，
+  返回设备、版本与当前负载）。
+
+#### 已知限制 {#comfyui-known-limitations}
+
+- 覆盖模板与内置模板都只针对 MiniMax H3 工作流；
+- 主机在提交瞬间挂掉时不会自动把任务转移到池内其他主机（任务失败后由重试机制处理）；
+- 暂不支持参考视频输入；
+- 视频任务不可取消（取消走 worker 级终止，ComfyUI 侧的 `/interrupt` 未接入）。
+
 ## 11. 多 API Key {#multiple-api-keys}
 
 同一供应商可以配置多个 API Key，并选择当前激活 Key。
