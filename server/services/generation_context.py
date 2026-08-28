@@ -310,6 +310,7 @@ async def resolve_generation_context(
     image: ImageLaneRequest | None = None,
     video: VideoLaneRequest | None = None,
     audio: AudioLaneRequest | None = None,
+    on_video_submitted: Callable[[], None] | None = None,
 ) -> GenerationContext:
     """在单个 ConfigResolver session 内解析全部声明 lane、构造 backend 并组装 MediaGenerator。
 
@@ -445,6 +446,7 @@ async def resolve_generation_context(
         image_provider_id=image_result.provider_model.provider_id if image_result else None,
         video_provider_id=video_result.provider_model.provider_id if video_result else None,
         audio_provider_id=audio_result.provider_model.provider_id if audio_result else None,
+        on_video_submitted=on_video_submitted,
     )
     return GenerationContext(
         generator=generator,

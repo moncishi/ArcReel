@@ -174,6 +174,7 @@ class MediaGenerator:
         image_provider_id: str | None = None,
         video_provider_id: str | None = None,
         audio_provider_id: str | None = None,
+        on_video_submitted: Callable[[], None] | None = None,
     ):
         """
         初始化 MediaGenerator
@@ -207,6 +208,7 @@ class MediaGenerator:
         self._image_provider_id = image_provider_id
         self._video_provider_id = video_provider_id
         self._audio_provider_id = audio_provider_id
+        self._on_video_submitted = on_video_submitted
         self.versions = VersionManager(project_path)
 
         # 初始化记账账本（使用全局 async session factory）
@@ -1030,6 +1032,12 @@ class MediaGenerator:
                 nonlocal provider_resubmit_unsafe
                 provider_resubmit_unsafe = True
 
+            def _release_pool_lease() -> None:
+                # 池调度租约在「上传 + 提交」窗口持有；提交成功即释放（幂等），
+                # 让同一节点的下一个并发槽可用。非池路径 _on_video_submitted 为 None。
+                if self._on_video_submitted is not None:
+                    self._on_video_submitted()
+
             def _call_video(compressed: "list[CompressedRef]"):
                 start_arg = compressed[start_spec_idx].path if start_spec_idx is not None else None
                 end_arg = compressed[end_spec_idx].path if end_spec_idx is not None else None
@@ -1059,6 +1067,7 @@ class MediaGenerator:
                         project_name=self.project_name,
                         task_id=task_id,
                         on_provider_resubmit_unsafe=_mark_provider_resubmit_unsafe,
+                        on_provider_submitted=_release_pool_lease,
                         service_tier=version_metadata.get("service_tier", "default"),
                         seed=version_metadata.get("seed"),
                     )

@@ -46,7 +46,16 @@ def _fake_resolve_ctx(
     """
 
     async def _resolve(
-        project_name, payload, *, project, user_id="default", episode=None, image=None, video=None, audio=None
+        project_name,
+        payload,
+        *,
+        project,
+        user_id="default",
+        episode=None,
+        image=None,
+        video=None,
+        audio=None,
+        on_video_submitted=None,
     ):
         if seen_lane_requests is not None:
             seen_lane_requests.append({"image": image, "video": video, "audio": audio})
