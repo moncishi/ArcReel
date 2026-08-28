@@ -21,7 +21,11 @@ from lib.config.resolver import (
     get_provider_fallback,
 )
 from lib.config.service import DEFAULT_VIDEO_POLL_TIMEOUT_SECONDS
-from lib.custom_provider.comfyui_pool import COMFYUI_POOL_PROVIDER_ID
+from lib.custom_provider.comfyui_pool import (
+    COMFYUI_POOL_PROVIDER_ID,
+    pin_pool_host_payload,
+    select_pool_host,
+)
 from lib.db import async_session_factory
 from lib.db.base import DEFAULT_USER_ID
 from lib.generation_queue import (
@@ -373,8 +377,6 @@ async def execute_reference_video_task(
     if claimed_provider_id == COMFYUI_POOL_PROVIDER_ID:
         # 池任务：执行前经调度器租约选具体主机，并把选中主机 pin 进执行 payload，
         # 使 resolve_generation_context 解析到该主机（checkpoint / backend / 续跑一致）。
-        from lib.custom_provider.comfyui_pool import pin_pool_host_payload, select_pool_host
-
         pool_host, pool_lease = await select_pool_host()
         execution_payload = pin_pool_host_payload(execution_payload, pool_host, execution_capability)
         pool_lease_release = pool_lease.release
