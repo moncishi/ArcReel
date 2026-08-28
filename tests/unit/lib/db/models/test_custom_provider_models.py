@@ -97,6 +97,7 @@ class TestCustomProviderModelTable:
             "supported_durations",
             "resolution",
             "capability_overrides",
+            "comfyui_workflow",
             "created_at",
             "updated_at",
         }

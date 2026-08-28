@@ -233,6 +233,10 @@ MESSAGES = {
         "Model {model_id} must have max_reference_audio_count greater than 0 when reference audio is supported; "
         "override reference_audio_mode to none to turn voice reference off"
     ),
+    "comfyui_workflow_endpoint_only": (
+        "Endpoint {endpoint} of model {model_id} does not support ComfyUI override workflow configuration"
+    ),
+    "comfyui_workflow_invalid": "ComfyUI override workflow of model {model_id} is invalid: {reason}",
     # Projects
     "unknown_style_template": "Unknown style template: {template_id}",
     "ad_only_field": "{field} is only available for ad/short-video projects (content_mode=ad)",

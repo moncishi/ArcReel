@@ -91,3 +91,7 @@ class CustomProviderModel(TimestampMixin, Base):
     # 跟随系统判定；写死的能力维度列表不进 schema，向新维度开放无需迁移。合成语义由
     # lib.custom_provider.capabilities 唯一承载。
     capability_overrides: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    # 模型级 ComfyUI 覆盖工作流（API-format 图 JSON）；仅 comfyui-video endpoint 有意义，
+    # 其余 endpoint 恒为 NULL。写入侧经 validate_comfyui_workflows 校验，backend 构造期读取
+    # 并装配进 configured_workflows。
+    comfyui_workflow: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)

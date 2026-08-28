@@ -22,7 +22,12 @@ export interface EndpointDescriptor {
   image_capabilities: ImageCap[] | null;
   /** 执行层是否真的下传尾帧约束；仅 video 类有意义，其余恒为 false。 */
   end_image_capable: boolean;
+  /** comfyui-video 的内置工作流模板图快照（template_key → API-format workflow）；其余省略或 null。 */
+  comfyui_builtin_templates?: Record<string, ComfyUIWorkflowGraph> | null;
 }
+
+/** API-format ComfyUI 工作流图：节点 id → { class_type, inputs }。 */
+export type ComfyUIWorkflowGraph = Record<string, { class_type: string; inputs: Record<string, unknown> }>;
 
 export interface CustomProviderInfo {
   id: number;
@@ -55,6 +60,8 @@ export interface CustomProviderModelInfo {
   system_capabilities: VideoCapabilityFlags | null;
   /** 用户覆盖（稀疏），与 system_capabilities 合并即为生效值；无覆盖为 null。 */
   capability_overrides: CapabilityOverrides | null;
+  /** ComfyUI 覆盖工作流（API-format 图 JSON）；仅 comfyui-video endpoint 非 null。 */
+  comfyui_workflow?: ComfyUIWorkflowGraph | null;
   /** 正在引用该模型的全局 system_settings 键名（如 default_video_backend_i2v）；未被引用为 null。 */
   global_bucket_refs: string[] | null;
 }
@@ -124,6 +131,8 @@ export interface CustomProviderModelInput {
   resolution?: string | null;
   /** 保存模型列表是整体替换语义：省略该字段会清空已有覆盖，编辑既有模型时必须原样回传。 */
   capability_overrides?: CapabilityOverrides | null;
+  /** ComfyUI 覆盖工作流（API-format 图 JSON）；仅 comfyui-video endpoint 有意义，其余忽略。 */
+  comfyui_workflow?: ComfyUIWorkflowGraph | null;
 }
 
 export interface CustomProviderCredentials {

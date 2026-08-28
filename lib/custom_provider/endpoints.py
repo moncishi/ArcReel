@@ -45,6 +45,11 @@ from lib.text_backends.gemini import GeminiTextBackend
 from lib.text_backends.openai import OpenAITextBackend
 from lib.video_backends.ark import ArkVideoBackend
 from lib.video_backends.base import ReferenceAudioMode, VideoCapabilities
+from lib.video_backends.comfyui import (
+    BUILTIN_COMFYUI_MODELS,
+    ComfyUIVideoBackend,
+    build_builtin_template_snapshot,
+)
 from lib.video_backends.dashscope import DashScopeVideoBackend, classify_wan_model
 from lib.video_backends.kling import KlingVideoBackend
 from lib.video_backends.minimax import MiniMaxVideoBackend
@@ -60,6 +65,20 @@ if TYPE_CHECKING:
 #: catalog 里用户自定义端点的家族标识。内置端点的 family 指向协议出处（openai / kling …），
 #: 用户端点的协议由定义自身描述，没有可归属的外部家族。
 CUSTOM_ENDPOINT_FAMILY = "custom"
+
+
+#: comfyui-video 内置工作流模板的显示名 i18n key（frontend dashboard ns），与内置模型一一对应。
+#: 前端 ComfyUI 工作流下拉的选项文本从这里取；后端不消费显示名，仅注册表自描述。
+COMFYUI_TEMPLATE_NAME_KEYS: dict[str, str] = {
+    model: f"comfyui_workflow_template_{model.replace('-', '_')}" for model in BUILTIN_COMFYUI_MODELS
+}
+
+
+#: comfyui-video 内置工作流模板的默认图快照（``template_key → API-format workflow``）。构造
+#: 期 fail-fast：模板图在 import 期就物化，配置界面「按模板起步」无需请求期再构。
+COMFYUI_BUILTIN_TEMPLATES: dict[str, dict[str, dict[str, Any]]] = {
+    model: build_builtin_template_snapshot(model) for model in BUILTIN_COMFYUI_MODELS
+}
 
 
 # ── EndpointSpec 数据类型 ───────────────────────────────────────────
@@ -101,6 +120,10 @@ class EndpointSpec:
     # VideoGenerationRequest.reference_audio_files 并组装进供应商请求。仅 video 类有意义；
     # False 时把 reference_audio_mode 覆盖为 direct 只会让能力声明失真，执行层照旧不带音色输入。
     reference_audio_capable: bool = False
+    # 该 endpoint 的模型行是否携带模型级配置字段（当前仅 comfyui-video 的覆盖工作流 JSON）。
+    # 不直接声明配置键名：配置由 build_backend 闭包按 endpoint 读取，spec 只在此标记「有配置」，
+    # 供调用方决定要不要回传 / 校验该字段（避免对不接受的 endpoint 静默丢数据）。
+    accepts_model_settings: bool = False
     # 声明式定义的整份 JSON：随版定义读自 builtin_endpoints/，用户定义读自 custom_endpoint 表。
     # Python 实现的 endpoint 为 None。非 None 即该 endpoint 的调用形态由这份定义描述，上面各字段
     # 都是从它派生出来的镜像，取值一律以本字段为准。
@@ -264,6 +287,21 @@ def _build_kling_video(provider, model_id: str) -> CustomVideoBackend:
     # 中转站「原样代理可灵」：bearer 模式旁路 JWT 管理器，用静态 api_key 直发可灵原生异步视频端点。
     base_url = _ensure_url_path_suffix(provider.base_url, "/v1")
     delegate = KlingVideoBackend(auth_mode="bearer", api_key=provider.api_key, base_url=base_url, model=model_id)
+    return CustomVideoBackend(provider_id=provider.provider_id, delegate=delegate, model=model_id)
+
+
+def _build_comfyui_video(provider, model_id: str, model_settings: object | None = None) -> CustomVideoBackend:
+    if not provider.base_url:
+        raise ValueError("comfyui-video 端点需要 base_url")
+    configured_workflows: list[Mapping[str, Any]] | None = (
+        [{"model": model_id, "workflow": model_settings}] if isinstance(model_settings, dict) else None
+    )
+    delegate = ComfyUIVideoBackend(
+        api_key=provider.api_key,
+        base_url=provider.base_url,
+        model=model_id,
+        configured_workflows=configured_workflows,
+    )
     return CustomVideoBackend(provider_id=provider.provider_id, delegate=delegate, model=model_id)
 
 
@@ -466,6 +504,22 @@ ENDPOINT_REGISTRY: dict[str, EndpointSpec] = {
         video_caps_for_model=KlingVideoBackend.video_capabilities_for_model,
         end_image_capable=True,
     ),
+    "comfyui-video": EndpointSpec(
+        key="comfyui-video",
+        media_type="video",
+        family="comfyui",
+        display_name_key="endpoint_comfyui_video_display",
+        request_method="POST",
+        # ComfyUI 是本地工作流服务：HTTP 形态由 workflow 图决定，路径模板仅作展示占位
+        request_path_template="/prompt",
+        build_backend=_build_comfyui_video,
+        # 多 model（内置三个 + 自定义覆盖）共享同一份模板容量：endpoint 维度不声明 int cap，
+        # 按 model 读 backend 纯 caps 函数（内置模板 ref_images 恒 9 张，custom 模板同约束）。
+        video_caps_for_model=ComfyUIVideoBackend.video_capabilities_for_model,
+        # 模板无尾帧输入；参考音频经 ref_audios 通道直传（模板层实现完整）
+        reference_audio_capable=True,
+        accepts_model_settings=True,
+    ),
 }
 
 
@@ -625,6 +679,12 @@ def endpoint_spec_to_dict(spec: EndpointSpec) -> dict:
     data = asdict(spec)
     data.pop("build_backend", None)
     data.pop("video_caps_for_model", None)  # 同 build_backend：callable 不可 JSON 化，剥掉
+    # accepts_model_settings 是后端装配开关（工厂按它决定是否传 model_settings），前端目录
+    # 不需要，剥掉避免 EndpointDescriptor 与 spec 字段漂移。
+    data.pop("accepts_model_settings", None)
+    # comfyui-video 的内置模板图快照：前端「按模板起步」的选项来源，与后端 BUILTIN_COMFYUI_MODELS
+    # 同源。其余 endpoint 恒为 None（无模型级配置维度），与 image_capabilities 的形态一致。
+    data["comfyui_builtin_templates"] = COMFYUI_BUILTIN_TEMPLATES if spec.key == "comfyui-video" else None
     # catalog 不内嵌定义：整份 JSON 由 GET /custom-providers/endpoints/{key}/definition 单独取。
     data.pop("definition", None)
     data["kind"] = spec.kind

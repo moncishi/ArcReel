@@ -64,6 +64,21 @@ const FIXTURE: EndpointDescriptor[] = [
     image_capabilities: ["image_to_image"],
     end_image_capable: false,
   },
+  {
+    key: "comfyui-video",
+    media_type: "video",
+    family: "comfyui",
+    kind: "python",
+    display_name: null,
+    display_name_key: "endpoint_comfyui_video_display",
+    request_method: "POST",
+    request_path_template: "/prompt",
+    image_capabilities: null,
+    end_image_capable: false,
+    comfyui_builtin_templates: {
+      "minimax-h3-ref2va": { "92": { class_type: "SaveVideo", inputs: { filename_prefix: "video/MiniMax_H3/arcreel" } } },
+    },
+  },
 ];
 
 describe("endpoint-catalog-store", () => {
@@ -86,6 +101,7 @@ describe("endpoint-catalog-store", () => {
       "openai-images": "image",
       "openai-images-generations": "image",
       "openai-images-edits": "image",
+      "comfyui-video": "video",
     });
     expect(s.endpointPaths["openai-chat"]).toEqual({ method: "POST", path: "/v1/chat/completions" });
     expect(s.endpointPaths["openai-images-edits"]).toEqual({ method: "POST", path: "/v1/images/edits" });
@@ -116,6 +132,20 @@ describe("endpoint-catalog-store", () => {
     expect(map["openai-chat"]).toBe(false);
     expect(map["openai-images"]).toBe(false);
     expect(Object.keys(map)).toHaveLength(FIXTURE.length);
+  });
+
+  it("derives endpointToComfyuiTemplates only for comfyui-video", async () => {
+    vi.spyOn(API, "listEndpointCatalog").mockResolvedValue({ endpoints: FIXTURE });
+
+    await useEndpointCatalogStore.getState().fetch();
+
+    const map = useEndpointCatalogStore.getState().endpointToComfyuiTemplates;
+    // comfyui-video 带出内置模板快照
+    expect(map["comfyui-video"]).toBeDefined();
+    expect(Object.keys(map["comfyui-video"])).toContain("minimax-h3-ref2va");
+    // 其余 endpoint 不出现
+    expect(map["openai-chat"]).toBeUndefined();
+    expect(map["newapi-video"]).toBeUndefined();
   });
 
   it("fetch short-circuits after initialized", async () => {

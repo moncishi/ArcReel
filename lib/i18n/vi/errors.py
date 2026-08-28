@@ -227,6 +227,10 @@ MESSAGES = {
         "Mô hình {model_id} phải có max_reference_audio_count lớn hơn 0 khi hỗ trợ âm thanh tham chiếu; "
         "hãy ghi đè reference_audio_mode thành none để tắt tham chiếu giọng nói"
     ),
+    "comfyui_workflow_endpoint_only": (
+        "Endpoint {endpoint} của mô hình {model_id} không hỗ trợ cấu hình workflow ghi đè ComfyUI"
+    ),
+    "comfyui_workflow_invalid": "Workflow ghi đè ComfyUI của mô hình {model_id} không hợp lệ: {reason}",
     "capability_override_last_frame_unsupported": (
         "Endpoint {endpoint} của mô hình {model_id} không hỗ trợ tạo khung hình cuối; "
         "không thể ghi đè last_frame thành true"

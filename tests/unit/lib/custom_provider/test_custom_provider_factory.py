@@ -24,6 +24,7 @@ from lib.custom_provider.factory import create_custom_backend
 # endpoints 模块里被 build_backend 闭包直接构造的全部后端类。
 _ENDPOINT_BACKEND_CLASSES = (
     "ArkVideoBackend",
+    "ComfyUIVideoBackend",
     "DashScopeImageBackend",
     "DashScopeVideoBackend",
     "GeminiImageBackend",
@@ -265,6 +266,42 @@ class TestEndpointDispatch:
         _result, built = _built(provider, "kling-v3", "kling-video")
         # 纯域名（无 scheme）→ 补 https:// 再挂载 /v1
         assert built["kwargs"]["base_url"] == "https://relay.example.com/v1"
+
+    def test_comfyui_video(self):
+        provider = _make_provider(base_url="http://localhost:8188")
+        result, built = _built(provider, "minimax-h3-ref2va", "comfyui-video")
+        assert isinstance(result, CustomVideoBackend)
+        assert result.model == "minimax-h3-ref2va"
+        # base_url 原样下传；无模型级配置时 configured_workflows 为 None
+        assert built == {
+            "backend": "ComfyUIVideoBackend",
+            "kwargs": {
+                "api_key": "sk-test",
+                "base_url": "http://localhost:8188",
+                "model": "minimax-h3-ref2va",
+                "configured_workflows": None,
+            },
+        }
+
+    def test_comfyui_video_passes_model_settings_as_configured_workflows(self):
+        provider = _make_provider(base_url="http://localhost:8188")
+        workflow = {"92": {"class_type": "SaveVideo", "inputs": {"filename_prefix": "x"}}}
+        # 用记录器直接调 build_backend 闭包：create_custom_backend 通过 spec.accepts_model_settings
+        # 决定是否传第三参，此处验证第三参被原样装进 configured_workflows
+        from lib.custom_provider.endpoints import ENDPOINT_REGISTRY
+
+        with _endpoint_backends() as records:
+            # 闭包在 spec 上类型为 2 参（标准 Callable），第三参由工厂按 accepts_model_settings
+            # 传入；与 factory.py 同口径 ignore，仅测试直接调用闭包。
+            result = ENDPOINT_REGISTRY["comfyui-video"].build_backend(provider, "my-model", workflow)  # type: ignore[call-arg]
+        assert isinstance(result, CustomVideoBackend)
+        assert len(records) == 1
+        assert records[0]["kwargs"]["configured_workflows"] == [{"model": "my-model", "workflow": workflow}]
+
+    def test_comfyui_video_missing_base_url_raises(self):
+        provider = _make_provider(base_url="")
+        with pytest.raises(ValueError, match="需要 base_url"):
+            create_custom_backend(provider=provider, model_id="minimax-h3-ref2va", endpoint="comfyui-video")
 
     def test_openai_images_generations(self):
         result, built = _built(_make_provider(), "dall-e-3", "openai-images-generations")

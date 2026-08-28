@@ -23,6 +23,7 @@ def create_custom_backend(
     model_id: str,
     endpoint: str,
     capability_overrides: object | None = None,
+    model_settings: object | None = None,
 ) -> CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend:
     """按 endpoint 查 ENDPOINT_REGISTRY 并构造 Backend。
 
@@ -34,12 +35,19 @@ def create_custom_backend(
         model_id: 该次调用使用的具体模型 id
         endpoint: ENDPOINT_REGISTRY 的键
         capability_overrides: 该模型的 `capability_overrides` 原始值；None = 全部跟随系统判定
+        model_settings: 该模型的模型级配置（当前仅 comfyui-video 的覆盖工作流 JSON dict）；
+            endpoint 不声明 accepts_model_settings 时忽略。None = 无配置。
 
     Raises:
         ValueError: endpoint 不在 ENDPOINT_REGISTRY 中
     """
     spec = get_endpoint_spec(endpoint)
-    backend = spec.build_backend(provider, model_id)
+    if spec.accepts_model_settings:
+        # 只有声明 accepts_model_settings 的闭包（当前仅 comfyui-video）接受第三个参数；
+        # 其余闭包都是 2 参，标准 Callable 类型表达不了这一异变，故在此按键窄化。
+        backend = spec.build_backend(provider, model_id, model_settings)  # type: ignore[call-arg]
+    else:
+        backend = spec.build_backend(provider, model_id)
     if isinstance(backend, CustomVideoBackend):
         merged, applied = synthesize_video_capabilities_with_overrides(
             endpoint=endpoint, model_id=model_id, overrides=capability_overrides
