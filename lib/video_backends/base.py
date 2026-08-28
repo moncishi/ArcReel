@@ -796,6 +796,11 @@ class VideoGenerationRequest:
     # call whose failure cannot prove that the provider rejected the request before accepting a paid job.
     on_provider_resubmit_unsafe: Callable[[], None] | None = None
 
+    # 池调度专用：backend 在「提交成功、任务已入供应商队列」后调用（幂等）。租约的语义是
+    # 「上传 + 提交」的原子窗口——提交后任务由供应商队列承载，负载经健康检查反映，
+    # 继续持有租约会锁死同一节点的下一个并发槽。非池路径不传，恒 None。
+    on_provider_submitted: Callable[[], None] | None = None
+
     # 自定义供应商包装层（`CustomVideoBackend`）在转发给协议 backend 前注入的协议标识，与 job_id
     # 一并持久化到 `tasks.provider_endpoint`，记录本笔供应商任务的协议归属。内置供应商无此维度，
     # 保持 None。续跑比对协议读的是 checkpoint 的 endpoint_guard，不读该列。

@@ -759,6 +759,8 @@ class ComfyUIVideoBackend(ProviderJobIdPersistenceMixin):
             # 一并写回实际提交域名：续跑据此回放原主机轮询 /view 下载，用户在途改 base_url
             # 后按新域名查旧 prompt 会 404，被误判成历史过期（与 dashscope 同口径）。
             await self._persist_provider_job_id(request, prompt_id, provider=PROVIDER_COMFYUI, endpoint=self._base_url)
+            if request.on_provider_submitted is not None:
+                request.on_provider_submitted()
             return await self._poll_and_build(client, prompt_id, request, is_resume=False)
 
     async def resume_video(self, job_id: str, request: VideoGenerationRequest) -> VideoGenerationResult:

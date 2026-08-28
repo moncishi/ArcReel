@@ -41,6 +41,10 @@ _ORPHAN_RESCAN_LEASE_LOST_MULT = 3
 
 from lib.api_errors import ApiError
 from lib.config.resolver import VideoBucketCapabilityError
+from lib.custom_provider.comfyui_pool import (
+    COMFYUI_POOL_PROVIDER_ID,
+    discover_comfyui_pool,
+)
 from lib.generation_queue import (
     TASK_POLL_INTERVAL_SEC,
     TASK_WORKER_HEARTBEAT_SEC,
@@ -274,6 +278,24 @@ class CapacityTable:
                 audio_max = provider.audio_max_workers if provider.audio_max_workers is not None else default_audio
                 limits[pid] = cls._lane_limits(media_types, image_max, video_max, audio_max)
 
+            # ComfyUI 池容量：各成员主机 video_max_workers 之和。池任务经 _extract_provider
+            # 投影到 COMFYUI_POOL_PROVIDER_ID，按池总量限流（池满保持 queued）；单主机
+            # 「≤2」由执行入口的池调度器租约强制。
+            from lib.custom_provider.comfyui_pool import (
+                COMFYUI_POOL_PROVIDER_ID,
+                discover_comfyui_pool,
+                pool_capacity,
+            )
+
+            pool_hosts = await discover_comfyui_pool()
+            if pool_hosts:
+                limits[COMFYUI_POOL_PROVIDER_ID] = cls._lane_limits(
+                    {"video"},
+                    default_image,
+                    pool_capacity(pool_hosts),
+                    default_audio,
+                )
+
         logger.info("从 DB 加载供应商容量表: %s", limits)
         return cls(
             _limits=limits,
@@ -449,10 +471,14 @@ async def _extract_provider(task: dict[str, Any]) -> str:
         else:
             capability = "i2i" if task.get("task_type") == "image_edit" else "t2i"
             resolved = await resolver.resolve_image_backend(project, payload, capability=capability)
+        if is_video and await _is_comfyui_video_provider(resolved.provider_id):
+            # ComfyUI 池任务：解析到的 provider 是池内某一主机（custom-N），但认领/容量按
+            # 整个池（comfyui-pool）计——池满任务保持 queued，执行入口再经调度器选具体主机。
+            return COMFYUI_POOL_PROVIDER_ID
+        return resolved.provider_id or DEFAULT_PROVIDER
     except Exception:
         logger.debug("provider 解析失败，回退 DEFAULT_PROVIDER 仅供限流路由", exc_info=True)
         return DEFAULT_PROVIDER
-    return resolved.provider_id or DEFAULT_PROVIDER
 
 
 async def _execute_task(task: dict[str, Any], *, claimed_provider_id: str | None = None) -> dict[str, Any]:
@@ -470,6 +496,12 @@ async def _read_video_poll_timeout_seconds() -> int:
 
     async with safe_session_factory() as session:
         return await ConfigService(session).get_video_poll_timeout_seconds()
+
+
+async def _is_comfyui_video_provider(provider_id: str) -> bool:
+    """provider 是否为 ComfyUI 池成员（启用了 comfyui-video 视频模型）。"""
+    hosts = await discover_comfyui_pool()
+    return any(host.provider_id == provider_id for host in hosts)
 
 
 class GenerationWorker:

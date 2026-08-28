@@ -58,6 +58,7 @@ from lib.audio_utils import (
 from lib.config.registry import PROVIDER_REGISTRY
 from lib.config.resolver import constrain_durations, video_bucket_for_generation_mode
 from lib.config.service import DEFAULT_VIDEO_POLL_TIMEOUT_SECONDS
+from lib.custom_provider.comfyui_pool import COMFYUI_POOL_PROVIDER_ID
 from lib.db.base import DEFAULT_USER_ID
 from lib.generation_queue import (
     CompensableGenerationResult,
@@ -2329,421 +2330,451 @@ async def execute_video_task(
     # lane 归桶按项目生成模式求值，与提交入口（``generate_video``）同源：入口挡掉参考生视频后
     # 到达这里的项目恒为 i2v，但桶不在两处各硬编码一次，避免生成模式口径分叉。
     execution_payload = without_video_execution_identity(payload) if task_id is not None else payload
-    ctx = await resolve_generation_context(
-        project_name,
-        execution_payload,
-        project=project,
-        user_id=user_id,
-        video=VideoLaneRequest(capability=video_bucket_for_generation_mode(project.get("generation_mode"))),
-        audio=AudioLaneRequest() if delivery_options.narration_delivery == USE_TTS else None,
-    )
-    generator = ctx.generator
-    registry_provider_id = ctx.video.provider_model.provider_id
-    if claimed_provider_id is not None and registry_provider_id != claimed_provider_id:
-        raise DispatchProviderChanged(
-            claimed_provider_id=claimed_provider_id,
-            actual_provider_id=registry_provider_id,
+    pool_lease_release: Callable[[], None] | None = None
+    if claimed_provider_id == COMFYUI_POOL_PROVIDER_ID:
+        # 池任务：执行前经调度器租约选具体主机，并把选中主机 pin 进执行 payload，
+        # 使 resolve_generation_context 解析到该主机（checkpoint / backend / 续跑一致）。
+        from lib.custom_provider.comfyui_pool import pin_pool_host_payload, select_pool_host
+
+        pool_host, pool_lease = await select_pool_host()
+        execution_payload = pin_pool_host_payload(
+            execution_payload,
+            pool_host,
+            "i2v" if video_bucket_for_generation_mode(project.get("generation_mode")) == "i2v" else "r2v",
         )
-    model_name = ctx.video.backend_model
-    supported_durations: list[int] = list(ctx.video.supported_durations)
-    resolution = ctx.video.resolution
+        pool_lease_release = pool_lease.release
+    try:
+        ctx = await resolve_generation_context(
+            project_name,
+            execution_payload,
+            project=project,
+            user_id=user_id,
+            video=VideoLaneRequest(capability=video_bucket_for_generation_mode(project.get("generation_mode"))),
+            audio=AudioLaneRequest() if delivery_options.narration_delivery == USE_TTS else None,
+            on_video_submitted=pool_lease_release,
+        )
+        generator = ctx.generator
+        registry_provider_id = ctx.video.provider_model.provider_id
+        if (
+            claimed_provider_id is not None
+            and claimed_provider_id != COMFYUI_POOL_PROVIDER_ID
+            and registry_provider_id != claimed_provider_id
+        ):
+            raise DispatchProviderChanged(
+                claimed_provider_id=claimed_provider_id,
+                actual_provider_id=registry_provider_id,
+            )
+        model_name = ctx.video.backend_model
+        supported_durations: list[int] = list(ctx.video.supported_durations)
+        resolution = ctx.video.resolution
 
-    artifact_episode = script_input.episode
-    formal_input_claims: list[ArtifactInputClaim] = [script_input.claim]
-    currency_resolver = active_artifact_currency_resolver(project_path, project)
-    storyboard_file, end_image = resolve_usable_storyboard_video_inputs(
-        project_path=project_path,
-        project=project,
-        episode=artifact_episode,
-        resource_id=resource_id,
-        item=item,
-        resolver=currency_resolver,
-        claims=formal_input_claims,
-    )
-    aspect_ratio = get_aspect_ratio(project, "videos")
-    seed = payload.get("seed")
+        artifact_episode = script_input.episode
+        formal_input_claims: list[ArtifactInputClaim] = [script_input.claim]
+        currency_resolver = active_artifact_currency_resolver(project_path, project)
+        storyboard_file, end_image = resolve_usable_storyboard_video_inputs(
+            project_path=project_path,
+            project=project,
+            episode=artifact_episode,
+            resource_id=resource_id,
+            item=item,
+            resolver=currency_resolver,
+            claims=formal_input_claims,
+        )
+        aspect_ratio = get_aspect_ratio(project, "videos")
+        seed = payload.get("seed")
 
-    def _visual_basis_digest_for(storyboard_image: Path, end_frame_image: Path | None) -> str:
-        return build_storyboard_video_visual_basis(
-            prompt=requested_visual_prompt,
-            storyboard_image=storyboard_image,
-            end_frame_image=end_frame_image,
-            aspect_ratio=aspect_ratio,
-            provider_id=registry_provider_id,
-            model_id=model_name,
-            resolution=resolution,
-            seed=seed,
-            requested_generate_audio=ctx.video.requested_generate_audio,
-            content_mode=content_mode,
-            utterances=item.get("utterances") if content_mode == "drama" else None,
-            has_utterances=content_mode == "drama" and "utterances" in item,
-            voice_characters=(None if ctx.video.is_silent else project.get("characters"))
-            if content_mode == "drama"
-            else None,
-        ).digest
+        def _visual_basis_digest_for(storyboard_image: Path, end_frame_image: Path | None) -> str:
+            return build_storyboard_video_visual_basis(
+                prompt=requested_visual_prompt,
+                storyboard_image=storyboard_image,
+                end_frame_image=end_frame_image,
+                aspect_ratio=aspect_ratio,
+                provider_id=registry_provider_id,
+                model_id=model_name,
+                resolution=resolution,
+                seed=seed,
+                requested_generate_audio=ctx.video.requested_generate_audio,
+                content_mode=content_mode,
+                utterances=item.get("utterances") if content_mode == "drama" else None,
+                has_utterances=content_mode == "drama" and "utterances" in item,
+                voice_characters=(None if ctx.video.is_silent else project.get("characters"))
+                if content_mode == "drama"
+                else None,
+            ).digest
 
-    def _current_visual_basis_digest() -> str:
-        return _visual_basis_digest_for(storyboard_file, end_image)
+        def _current_visual_basis_digest() -> str:
+            return _visual_basis_digest_for(storyboard_file, end_image)
 
-    visual_basis_digest = await asyncio.to_thread(_current_visual_basis_digest)
+        visual_basis_digest = await asyncio.to_thread(_current_visual_basis_digest)
 
-    # Voice_Profiles 声明段唯一来源是下方 build_drama_video_prompt 的机械派生：调用方（WebUI
-    # 请求体 / 剧本 JSON 残留）自带的 voice_profiles 一律先剥离，不因 utterances 门控不触发
-    # （narration/ad、或 drama 无 utterances 的条目）而绕过 C 类（真无声）门控直达 YAML。
-    if isinstance(prompt, dict):
-        prompt = strip_voice_profiles(prompt)
+        # Voice_Profiles 声明段唯一来源是下方 build_drama_video_prompt 的机械派生：调用方（WebUI
+        # 请求体 / 剧本 JSON 残留）自带的 voice_profiles 一律先剥离，不因 utterances 门控不触发
+        # （narration/ad、或 drama 无 utterances 的条目）而绕过 C 类（真无声）门控直达 YAML。
+        if isinstance(prompt, dict):
+            prompt = strip_voice_profiles(prompt)
 
-    # drama 口型台词单一真相源在分镜级有序 utterances：从 dialogue-kind 条目取台词注入 video YAML
-    # 的 dialogue 出口（覆盖 payload 里 drama 已不再携带的 video_prompt.dialogue）。narration / ad
-    # 的 item 无 utterances 字段，payload.dialogue 原样透传；SDK 路径 prompt 已是渲染好的字符串、跳过。
-    if isinstance(item, dict) and isinstance(prompt, dict) and content_mode == "drama":
-        # 无声（C 类模型不产音、或本集关闭音频）传 characters=None 即不注入 Voice_Profiles；
-        # 有音轨模型（含恒有声、开关不可控的型号）机械派生角色声音风格。
-        # 两条无声路径同口径，判据落在 VideoLaneResult.is_silent。台词不受影响、照常下发。
-        voice_characters = None if ctx.video.is_silent else (project.get("characters") or {})
-        if "utterances" in item:
-            prompt = build_drama_video_prompt(prompt, item.get("utterances"), characters=voice_characters)
-        else:
-            # utterances 迁移前的存量剧本：load_script 按原始 JSON 读盘不过 pydantic，不会
-            # 被 DramaScene._migrate_legacy 自动补齐，台词仍留在 video_prompt.dialogue。
-            prompt = build_drama_video_prompt_from_legacy_dialogue(prompt, characters=voice_characters)
+        # drama 口型台词单一真相源在分镜级有序 utterances：从 dialogue-kind 条目取台词注入 video YAML
+        # 的 dialogue 出口（覆盖 payload 里 drama 已不再携带的 video_prompt.dialogue）。narration / ad
+        # 的 item 无 utterances 字段，payload.dialogue 原样透传；SDK 路径 prompt 已是渲染好的字符串、跳过。
+        if isinstance(item, dict) and isinstance(prompt, dict) and content_mode == "drama":
+            # 无声（C 类模型不产音、或本集关闭音频）传 characters=None 即不注入 Voice_Profiles；
+            # 有音轨模型（含恒有声、开关不可控的型号）机械派生角色声音风格。
+            # 两条无声路径同口径，判据落在 VideoLaneResult.is_silent。台词不受影响、照常下发。
+            voice_characters = None if ctx.video.is_silent else (project.get("characters") or {})
+            if "utterances" in item:
+                prompt = build_drama_video_prompt(prompt, item.get("utterances"), characters=voice_characters)
+            else:
+                # utterances 迁移前的存量剧本：load_script 按原始 JSON 读盘不过 pydantic，不会
+                # 被 DramaScene._migrate_legacy 自动补齐，台词仍留在 video_prompt.dialogue。
+                prompt = build_drama_video_prompt_from_legacy_dialogue(prompt, characters=voice_characters)
 
-    prompt_text = _normalize_video_prompt(prompt)
-    service_tier = payload.get("video_provider_settings", {}).get("service_tier", "default")
+        prompt_text = _normalize_video_prompt(prompt)
+        service_tier = payload.get("video_provider_settings", {}).get("service_tier", "default")
 
-    # provider / model / 能力 / 分辨率均取自单次解析的 video lane：能力按 backend 实际身份
-    # （registry provider_id + backend.model）查询，与实际要调用的 model 对齐——历史任务 payload
-    # 携带 provider 覆盖、或自定义供应商目标 model 被禁用回退时，二者一致避免 duration 守卫误判
-    # （用「项目默认 model 的能力」误判「实际调用的 model」）。能力不可解析时 supported_durations
-    # 留空，守卫遇空列表放行（不更坏，见 ADR-0002）。解析/构造失败已在 resolve_generation_context
-    # 内原样上抛整次任务失败，不再有硬编码 provider/model 静默兜底。
-    # duration 解析收口于执行层：payload > project.default_duration > caps 默认。
-    # 用 ``is not None`` 而非 ``or`` 取 payload 值，避免显式 falsy 值被当作未设置。
-    duration_seconds = (
-        item.get("duration_seconds")
-        if task_id is not None and isinstance(item, dict)
-        else payload.get("duration_seconds")
-    )
-    if duration_seconds is None:
-        duration_seconds = project.get("default_duration")
-    if not duration_seconds:
-        # 取首项前先按当前分辨率的联动约束收窄：否则 Veo + 1080p/4k 的默认（Auto）设置会取到
-        # 4 秒，被 backend 的「该分辨率必须 8 秒」拒绝——UI 已按同一份声明门控，此处不收窄
-        # 就等于默认配置必然失败。显式指定的时长不经此收窄，其合法性由 assert_duration_supported
-        # 与 backend 的执行期校验把关。
-        candidates = constrain_durations(registry_provider_id, model_name, supported_durations, resolution=resolution)
+        # provider / model / 能力 / 分辨率均取自单次解析的 video lane：能力按 backend 实际身份
+        # （registry provider_id + backend.model）查询，与实际要调用的 model 对齐——历史任务 payload
+        # 携带 provider 覆盖、或自定义供应商目标 model 被禁用回退时，二者一致避免 duration 守卫误判
+        # （用「项目默认 model 的能力」误判「实际调用的 model」）。能力不可解析时 supported_durations
+        # 留空，守卫遇空列表放行（不更坏，见 ADR-0002）。解析/构造失败已在 resolve_generation_context
+        # 内原样上抛整次任务失败，不再有硬编码 provider/model 静默兜底。
+        # duration 解析收口于执行层：payload > project.default_duration > caps 默认。
+        # 用 ``is not None`` 而非 ``or`` 取 payload 值，避免显式 falsy 值被当作未设置。
         duration_seconds = (
-            candidates[0] if candidates else _get_model_default_duration(registry_provider_id, model_name)
+            item.get("duration_seconds")
+            if task_id is not None and isinstance(item, dict)
+            else payload.get("duration_seconds")
         )
-
-    delivery_projection = None
-    if delivery_options.narration_delivery == USE_TTS:
-        episode = artifact_episode
-        if episode is None:
-            episode = ProjectManager.resolve_episode_from_script(script, str(script_file))
-        current_planned_duration = item.get("duration_seconds") if isinstance(item, dict) else None
-        if (
-            not isinstance(current_planned_duration, int)
-            or isinstance(current_planned_duration, bool)
-            or current_planned_duration <= 0
-        ):
-            current_planned_duration = project.get("default_duration")
-        if (
-            not isinstance(current_planned_duration, int)
-            or isinstance(current_planned_duration, bool)
-            or current_planned_duration <= 0
-        ):
+        if duration_seconds is None:
+            duration_seconds = project.get("default_duration")
+        if not duration_seconds:
+            # 取首项前先按当前分辨率的联动约束收窄：否则 Veo + 1080p/4k 的默认（Auto）设置会取到
+            # 4 秒，被 backend 的「该分辨率必须 8 秒」拒绝——UI 已按同一份声明门控，此处不收窄
+            # 就等于默认配置必然失败。显式指定的时长不经此收窄，其合法性由 assert_duration_supported
+            # 与 backend 的执行期校验把关。
             candidates = constrain_durations(
+                registry_provider_id, model_name, supported_durations, resolution=resolution
+            )
+            duration_seconds = (
+                candidates[0] if candidates else _get_model_default_duration(registry_provider_id, model_name)
+            )
+
+        delivery_projection = None
+        if delivery_options.narration_delivery == USE_TTS:
+            episode = artifact_episode
+            if episode is None:
+                episode = ProjectManager.resolve_episode_from_script(script, str(script_file))
+            current_planned_duration = item.get("duration_seconds") if isinstance(item, dict) else None
+            if (
+                not isinstance(current_planned_duration, int)
+                or isinstance(current_planned_duration, bool)
+                or current_planned_duration <= 0
+            ):
+                current_planned_duration = project.get("default_duration")
+            if (
+                not isinstance(current_planned_duration, int)
+                or isinstance(current_planned_duration, bool)
+                or current_planned_duration <= 0
+            ):
+                candidates = constrain_durations(
+                    registry_provider_id,
+                    model_name,
+                    supported_durations,
+                    resolution=resolution,
+                )
+                if not candidates:
+                    raise ValueError("TTS video request requires a current integer planned duration")
+                current_planned_duration = candidates[0]
+            constrained_durations = constrain_durations(
                 registry_provider_id,
                 model_name,
                 supported_durations,
                 resolution=resolution,
             )
-            if not candidates:
-                raise ValueError("TTS video request requires a current integer planned duration")
-            current_planned_duration = candidates[0]
-        constrained_durations = constrain_durations(
-            registry_provider_id,
-            model_name,
-            supported_durations,
-            resolution=resolution,
-        )
-        delivery_projection = await prepare_current_narrated_video_duration(
-            project=project,
-            episode=episode,
-            preparation=admit_script_unit(script_kind, item).preparation,
-            project_path=project_path,
-            delivery=delivery_options.narration_delivery,
-            planned_duration_seconds=current_planned_duration,
-            supported_durations=constrained_durations,
-            confirmed_request_duration_seconds=delivery_options.confirmed_request_duration_seconds,
-            resolver=ResolvedTtsSettingsResolver.from_audio_lane(ctx.audio),
-            tts_in_progress=await tts_task_in_progress(
-                project_name=project_name,
-                resource_id=resource_id,
-                script_file=str(script_file),
-                user_id=user_id,
-            ),
-        )
-        narration_actual_duration = delivery_projection.narration.actual_duration_seconds
-        current_visual_duration = (
-            await current_selected_video_tier(
+            delivery_projection = await prepare_current_narrated_video_duration(
+                project=project,
+                episode=episode,
+                preparation=admit_script_unit(script_kind, item).preparation,
+                project_path=project_path,
+                delivery=delivery_options.narration_delivery,
+                planned_duration_seconds=current_planned_duration,
+                supported_durations=constrained_durations,
+                confirmed_request_duration_seconds=delivery_options.confirmed_request_duration_seconds,
+                resolver=ResolvedTtsSettingsResolver.from_audio_lane(ctx.audio),
+                tts_in_progress=await tts_task_in_progress(
+                    project_name=project_name,
+                    resource_id=resource_id,
+                    script_file=str(script_file),
+                    user_id=user_id,
+                ),
+            )
+            narration_actual_duration = delivery_projection.narration.actual_duration_seconds
+            current_visual_duration = (
+                await current_selected_video_tier(
+                    project_path=project_path,
+                    versions=generator.versions,
+                    item=item,
+                    resource_type="videos",
+                    resource_id=resource_id,
+                    visual_basis_digest=visual_basis_digest,
+                )
+                if narration_actual_duration is not None
+                else None
+            )
+            delivery_projection = prepare_narrated_video_duration(
+                narration=delivery_projection.narration,
+                planned_duration_seconds=current_planned_duration,
+                supported_durations=constrained_durations,
+                confirmed_request_duration_seconds=delivery_options.confirmed_request_duration_seconds,
+                current_visual_duration_seconds=current_visual_duration,
+            )
+            if not delivery_projection.allowed:
+                raise NarratedVideoDurationBlockedError(delivery_projection)
+            request_duration = delivery_projection.request_duration_seconds
+            if request_duration is None:
+                raise RuntimeError("allowed narrated video projection is missing a request duration")
+            duration_seconds = request_duration
+        if not isinstance(duration_seconds, (int, str)) or isinstance(duration_seconds, bool):
+            raise ValueError("video request duration must be an integer or integer string")
+        # 能力守卫：provider 解析之后的唯一权威家（见 ADR-0001）。安全解析交给守卫，
+        # 此处不预先 int() 截断，避免把非整数秒静默修正成「碰巧合法」的值。
+        assert_duration_supported(duration_seconds, supported_durations)
+        duration_seconds = int(float(duration_seconds))
+
+        if delivery_projection is not None:
+            if not isinstance(duration_seconds, int) or isinstance(duration_seconds, bool):
+                raise RuntimeError("allowed TTS video projection produced a non-integer request duration")
+            narration_actual_duration = delivery_projection.narration.actual_duration_seconds
+            if narration_actual_duration is None:
+                raise RuntimeError("allowed TTS video projection is missing actual narration duration")
+            reused = await reuse_current_video_for_tier(
                 project_path=project_path,
                 versions=generator.versions,
                 item=item,
                 resource_type="videos",
                 resource_id=resource_id,
+                request_duration_seconds=duration_seconds,
+                minimum_actual_duration_seconds=narration_actual_duration,
                 visual_basis_digest=visual_basis_digest,
+                revalidate_visual_basis_digest=_current_visual_basis_digest,
             )
-            if narration_actual_duration is not None
-            else None
-        )
-        delivery_projection = prepare_narrated_video_duration(
-            narration=delivery_projection.narration,
-            planned_duration_seconds=current_planned_duration,
-            supported_durations=constrained_durations,
-            confirmed_request_duration_seconds=delivery_options.confirmed_request_duration_seconds,
-            current_visual_duration_seconds=current_visual_duration,
-        )
-        if not delivery_projection.allowed:
-            raise NarratedVideoDurationBlockedError(delivery_projection)
-        request_duration = delivery_projection.request_duration_seconds
-        if request_duration is None:
-            raise RuntimeError("allowed narrated video projection is missing a request duration")
-        duration_seconds = request_duration
-    if not isinstance(duration_seconds, (int, str)) or isinstance(duration_seconds, bool):
-        raise ValueError("video request duration must be an integer or integer string")
-    # 能力守卫：provider 解析之后的唯一权威家（见 ADR-0001）。安全解析交给守卫，
-    # 此处不预先 int() 截断，避免把非整数秒静默修正成「碰巧合法」的值。
-    assert_duration_supported(duration_seconds, supported_durations)
-    duration_seconds = int(float(duration_seconds))
+            if reused is not None:
+                return reused
 
-    if delivery_projection is not None:
-        if not isinstance(duration_seconds, int) or isinstance(duration_seconds, bool):
-            raise RuntimeError("allowed TTS video projection produced a non-integer request duration")
-        narration_actual_duration = delivery_projection.narration.actual_duration_seconds
-        if narration_actual_duration is None:
-            raise RuntimeError("allowed TTS video projection is missing actual narration duration")
-        reused = await reuse_current_video_for_tier(
-            project_path=project_path,
-            versions=generator.versions,
-            item=item,
-            resource_type="videos",
-            resource_id=resource_id,
-            request_duration_seconds=duration_seconds,
-            minimum_actual_duration_seconds=narration_actual_duration,
-            visual_basis_digest=visual_basis_digest,
-            revalidate_visual_basis_digest=_current_visual_basis_digest,
-        )
-        if reused is not None:
-            return reused
+        provider_start_image = storyboard_file
+        provider_end_image = end_image
 
-    provider_start_image = storyboard_file
-    provider_end_image = end_image
+        async def _admit_before_submit(_api_call_id: int) -> Mapping[str, object] | None:
+            await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
+            return None
 
-    async def _admit_before_submit(_api_call_id: int) -> Mapping[str, object] | None:
-        await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
-        return None
-
-    checkpoint_hook: Callable[[int], Awaitable[Mapping[str, object] | None]] | None = _admit_before_submit
-    staged_media: tuple[StagedProviderMedia, ...] = ()
-    if task_id is not None:
-        artifact_speech_preparation = admit_script_unit(script_kind, item).preparation
-        artifact_speech = freeze_video_speech_facts(
-            artifact_speech_preparation,
-            characters=project.get("characters"),
-            include_voice_styles=not ctx.video.is_silent,
-        )
-        artifact_duration_basis = build_video_duration_basis(duration_seconds)
-        artifact_duration_tiers = tuple(
-            sorted(
-                {
-                    duration_seconds,
-                    *constrain_durations(
-                        registry_provider_id,
-                        model_name,
-                        supported_durations,
-                        resolution=resolution,
-                    ),
-                }
+        checkpoint_hook: Callable[[int], Awaitable[Mapping[str, object] | None]] | None = _admit_before_submit
+        staged_media: tuple[StagedProviderMedia, ...] = ()
+        if task_id is not None:
+            artifact_speech_preparation = admit_script_unit(script_kind, item).preparation
+            artifact_speech = freeze_video_speech_facts(
+                artifact_speech_preparation,
+                characters=project.get("characters"),
+                include_voice_styles=not ctx.video.is_silent,
             )
-        )
-        media_inputs = [
-            ProviderMediaInput(
-                path=storyboard_file,
-                role="start_image",
-                logical_type="storyboard",
-                logical_name=resource_id,
-                kind="first_frame",
+            artifact_duration_basis = build_video_duration_basis(duration_seconds)
+            artifact_duration_tiers = tuple(
+                sorted(
+                    {
+                        duration_seconds,
+                        *constrain_durations(
+                            registry_provider_id,
+                            model_name,
+                            supported_durations,
+                            resolution=resolution,
+                        ),
+                    }
+                )
             )
-        ]
-        if end_image is not None:
-            media_inputs.append(
+            media_inputs = [
                 ProviderMediaInput(
-                    path=end_image,
-                    role="end_image",
+                    path=storyboard_file,
+                    role="start_image",
                     logical_type="storyboard",
                     logical_name=resource_id,
-                    kind="last_frame",
+                    kind="first_frame",
                 )
+            ]
+            if end_image is not None:
+                media_inputs.append(
+                    ProviderMediaInput(
+                        path=end_image,
+                        role="end_image",
+                        logical_type="storyboard",
+                        logical_name=resource_id,
+                        kind="last_frame",
+                    )
+                )
+            staged_media = await stage_provider_media_for_task(project_path, task_id, tuple(media_inputs))
+            try:
+                formal_input_claims = list(
+                    bind_artifact_input_claims_to_content_digests(
+                        resolver=currency_resolver,
+                        claims=formal_input_claims,
+                        content_digests={media.source_locator: media.sha256 for media in staged_media},
+                    )
+                )
+                provider_start_image = safe_join(
+                    project_path,
+                    next(media.staged_locator for media in staged_media if media.role == "start_image"),
+                    require_file=True,
+                )
+                staged_end = next((media for media in staged_media if media.role == "end_image"), None)
+                provider_end_image = (
+                    safe_join(project_path, staged_end.staged_locator, require_file=True)
+                    if staged_end is not None
+                    else None
+                )
+                visual_basis_digest = await asyncio.to_thread(
+                    _visual_basis_digest_for, provider_start_image, provider_end_image
+                )
+                artifact_visual_basis = await asyncio.to_thread(
+                    lambda: build_storyboard_video_artifact_visual_basis(
+                        resource_id=resource_id,
+                        visual_prompt=requested_visual_prompt,
+                        storyboard_image=provider_start_image,
+                        end_frame_image=provider_end_image,
+                        aspect_ratio=aspect_ratio,
+                    )
+                )
+                artifact_video_basis = compose_video_artifact_basis(
+                    visual=artifact_visual_basis,
+                    speech=artifact_speech.basis,
+                    duration=artifact_duration_basis,
+                )
+                narration = delivery_projection.narration if delivery_projection is not None else None
+                narration_facts = NarrationExecutionFacts(
+                    delivery=delivery_options.narration_delivery,
+                    tts_status=narration.tts_status.value if narration is not None else "not_applicable",
+                    artifact_path=narration.artifact_path if narration is not None else "",
+                    basis_digest=narration.basis_digest if narration is not None else None,
+                    actual_duration_seconds=narration.actual_duration_seconds if narration is not None else None,
+                )
+
+                async def _checkpoint_before_submit(api_call_id: int) -> Mapping[str, object]:
+                    await asyncio.to_thread(
+                        assert_current_artifact_input_claims_usable, project_path, formal_input_claims
+                    )
+                    artifact_currency = VideoArtifactCurrencyFacts(
+                        episode=artifact_episode,
+                        request_duration_seconds=duration_seconds,
+                        visual_basis=artifact_visual_basis,
+                        speech_basis=artifact_speech.basis,
+                        duration_basis=artifact_duration_basis,
+                        video_basis=artifact_video_basis,
+                        voice_style_speakers=artifact_speech.voice_style_speakers,
+                        duration_tiers=artifact_duration_tiers,
+                        reference_image_limit=None,
+                        parent_version=generator.versions.get_current_version("videos", resource_id),
+                    )
+                    checkpoint = StoryboardSubmissionCheckpoint.create(
+                        task_id=task_id,
+                        project_name=project_name,
+                        script_file=script_file,
+                        unit_id=resource_id,
+                        capability="i2v",
+                        provider_id=ctx.video.provider_model.provider_id,
+                        provider_model_id=ctx.video.provider_model.model_id,
+                        backend_model_id=ctx.video.backend_model,
+                        endpoint_guard=ctx.video.endpoint,
+                        api_call_id=api_call_id,
+                        prompt=prompt_text,
+                        duration_seconds=duration_seconds,
+                        aspect_ratio=aspect_ratio,
+                        resolution=resolution,
+                        generate_audio=ctx.video.requested_generate_audio,
+                        service_tier=service_tier,
+                        seed=seed,
+                        visual_basis_digest=visual_basis_digest,
+                        artifact_currency=artifact_currency,
+                        narration=narration_facts,
+                        media=staged_media,
+                        reference_audio_targets=None,
+                    )
+                    await get_generation_queue().persist_execution_checkpoint(
+                        task_id,
+                        checkpoint.to_json(),
+                        checkpoint.provider_id,
+                    )
+                    return checkpoint_version_metadata(checkpoint)
+
+                checkpoint_hook = _checkpoint_before_submit
+            except BaseException:
+                await asyncio.to_thread(cleanup_staged_provider_media, project_path, task_id)
+                raise
+
+        artifact_committer = (
+            VideoArtifactCommitter(
+                project_manager=get_project_manager(),
+                project_name=project_name,
+                project_path=project_path,
+                versions=generator.versions,
+                resource_type="videos",
+                resource_id=resource_id,
+                prompt=prompt_text,
             )
-        staged_media = await stage_provider_media_for_task(project_path, task_id, tuple(media_inputs))
+            if task_id is not None
+            else None
+        )
         try:
-            formal_input_claims = list(
-                bind_artifact_input_claims_to_content_digests(
-                    resolver=currency_resolver,
-                    claims=formal_input_claims,
-                    content_digests={media.source_locator: media.sha256 for media in staged_media},
-                )
-            )
-            provider_start_image = safe_join(
-                project_path,
-                next(media.staged_locator for media in staged_media if media.role == "start_image"),
-                require_file=True,
-            )
-            staged_end = next((media for media in staged_media if media.role == "end_image"), None)
-            provider_end_image = (
-                safe_join(project_path, staged_end.staged_locator, require_file=True)
-                if staged_end is not None
-                else None
-            )
-            visual_basis_digest = await asyncio.to_thread(
-                _visual_basis_digest_for, provider_start_image, provider_end_image
-            )
-            artifact_visual_basis = await asyncio.to_thread(
-                lambda: build_storyboard_video_artifact_visual_basis(
-                    resource_id=resource_id,
-                    visual_prompt=requested_visual_prompt,
-                    storyboard_image=provider_start_image,
-                    end_frame_image=provider_end_image,
-                    aspect_ratio=aspect_ratio,
-                )
-            )
-            artifact_video_basis = compose_video_artifact_basis(
-                visual=artifact_visual_basis,
-                speech=artifact_speech.basis,
-                duration=artifact_duration_basis,
-            )
-            narration = delivery_projection.narration if delivery_projection is not None else None
-            narration_facts = NarrationExecutionFacts(
-                delivery=delivery_options.narration_delivery,
-                tts_status=narration.tts_status.value if narration is not None else "not_applicable",
-                artifact_path=narration.artifact_path if narration is not None else "",
-                basis_digest=narration.basis_digest if narration is not None else None,
-                actual_duration_seconds=narration.actual_duration_seconds if narration is not None else None,
+            await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
+            output_path, version, _, video_uri = await generator.generate_video_async(
+                prompt=prompt_text,
+                resource_type="videos",
+                resource_id=resource_id,
+                start_image=provider_start_image,
+                end_image=provider_end_image,
+                aspect_ratio=aspect_ratio,
+                duration_seconds=duration_seconds,
+                resolution=resolution,
+                task_id=task_id,
+                before_submit=checkpoint_hook,
+                formal_output=task_id is not None,
+                before_formal_commit=artifact_committer.prepare_selection if artifact_committer is not None else None,
+                commit_formal_output=artifact_committer,
+                seed=seed,
+                service_tier=service_tier,
+                visual_basis_digest=visual_basis_digest,
+                generate_audio=ctx.video.requested_generate_audio,
+                poll_timeout_seconds=poll_timeout_seconds,
             )
 
-            async def _checkpoint_before_submit(api_call_id: int) -> Mapping[str, object]:
-                await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
-                artifact_currency = VideoArtifactCurrencyFacts(
-                    episode=artifact_episode,
-                    request_duration_seconds=duration_seconds,
-                    visual_basis=artifact_visual_basis,
-                    speech_basis=artifact_speech.basis,
-                    duration_basis=artifact_duration_basis,
-                    video_basis=artifact_video_basis,
-                    voice_style_speakers=artifact_speech.voice_style_speakers,
-                    duration_tiers=artifact_duration_tiers,
-                    reference_image_limit=None,
-                    parent_version=generator.versions.get_current_version("videos", resource_id),
-                )
-                checkpoint = StoryboardSubmissionCheckpoint.create(
-                    task_id=task_id,
+            async def _finalize() -> dict[str, Any]:
+                return await _finalize_video_task(
                     project_name=project_name,
                     script_file=script_file,
-                    unit_id=resource_id,
-                    capability="i2v",
-                    provider_id=ctx.video.provider_model.provider_id,
-                    provider_model_id=ctx.video.provider_model.model_id,
-                    backend_model_id=ctx.video.backend_model,
-                    endpoint_guard=ctx.video.endpoint,
-                    api_call_id=api_call_id,
-                    prompt=prompt_text,
-                    duration_seconds=duration_seconds,
-                    aspect_ratio=aspect_ratio,
-                    resolution=resolution,
-                    generate_audio=ctx.video.requested_generate_audio,
-                    service_tier=service_tier,
-                    seed=seed,
-                    visual_basis_digest=visual_basis_digest,
-                    artifact_currency=artifact_currency,
-                    narration=narration_facts,
-                    media=staged_media,
-                    reference_audio_targets=None,
+                    project_path=project_path,
+                    resource_id=resource_id,
+                    version=version,
+                    video_uri=video_uri,
+                    generator=generator,
                 )
-                await get_generation_queue().persist_execution_checkpoint(
-                    task_id,
-                    checkpoint.to_json(),
-                    checkpoint.provider_id,
-                )
-                return checkpoint_version_metadata(checkpoint)
 
-            checkpoint_hook = _checkpoint_before_submit
-        except BaseException:
-            await asyncio.to_thread(cleanup_staged_provider_media, project_path, task_id)
-            raise
-
-    artifact_committer = (
-        VideoArtifactCommitter(
-            project_manager=get_project_manager(),
-            project_name=project_name,
-            project_path=project_path,
-            versions=generator.versions,
-            resource_type="videos",
-            resource_id=resource_id,
-            prompt=prompt_text,
-        )
-        if task_id is not None
-        else None
-    )
-    try:
-        await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
-        output_path, version, _, video_uri = await generator.generate_video_async(
-            prompt=prompt_text,
-            resource_type="videos",
-            resource_id=resource_id,
-            start_image=provider_start_image,
-            end_image=provider_end_image,
-            aspect_ratio=aspect_ratio,
-            duration_seconds=duration_seconds,
-            resolution=resolution,
-            task_id=task_id,
-            before_submit=checkpoint_hook,
-            formal_output=task_id is not None,
-            before_formal_commit=artifact_committer.prepare_selection if artifact_committer is not None else None,
-            commit_formal_output=artifact_committer,
-            seed=seed,
-            service_tier=service_tier,
-            visual_basis_digest=visual_basis_digest,
-            generate_audio=ctx.video.requested_generate_audio,
-            poll_timeout_seconds=poll_timeout_seconds,
-        )
-
-        async def _finalize() -> dict[str, Any]:
-            return await _finalize_video_task(
-                project_name=project_name,
-                script_file=script_file,
-                project_path=project_path,
+            return await complete_video_artifact_commit(
+                committer=artifact_committer,
+                versions=generator.versions,
+                resource_type="videos",
                 resource_id=resource_id,
                 version=version,
                 video_uri=video_uri,
-                generator=generator,
+                finalize=_finalize,
             )
-
-        return await complete_video_artifact_commit(
-            committer=artifact_committer,
-            versions=generator.versions,
-            resource_type="videos",
-            resource_id=resource_id,
-            version=version,
-            video_uri=video_uri,
-            finalize=_finalize,
-        )
+        finally:
+            if artifact_committer is not None:
+                await artifact_committer.release_admission_guard()
+            if task_id is not None:
+                await asyncio.to_thread(cleanup_staged_provider_media, project_path, task_id)
     finally:
-        if artifact_committer is not None:
-            await artifact_committer.release_admission_guard()
-        if task_id is not None:
-            await asyncio.to_thread(cleanup_staged_provider_media, project_path, task_id)
+        if pool_lease_release is not None:
+            # 外层兜底：租约在「选主机 → 解析 → 暂存 → 提交 → 收尾」全窗口持有，覆盖
+            # resolve/checkpoint/生成异常与 reuse 早退路径；提交成功路径已由
+            # on_video_submitted 释放（幂等），双路径叠加保证每个出口恰释放一次，
+            # 不会占满调度器 30min 过期窗口。
+            pool_lease_release()
 
 
 async def _finalize_video_task(
