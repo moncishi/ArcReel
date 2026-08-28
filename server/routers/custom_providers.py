@@ -154,6 +154,9 @@ class ModelInput(BaseModel):
     # 稀疏覆盖字典，键名对齐 VideoCapabilities 字段名；None 或键缺席 = 跟随系统判定。
     # 保存模型列表是整体替换语义，本字段必须随列表回传，否则存量覆盖被清空。
     capability_overrides: dict[str, object] | None = None
+    # ComfyUI 覆盖工作流（API-format 图 JSON）；仅 comfyui-video endpoint 有意义。
+    # None / 缺省 = 跟随内置模板（按内置模型）；非 comfyui-video endpoint 传值会被剔除。
+    comfyui_workflow: dict[str, object] | None = None
 
     @field_validator("capability_overrides")
     @classmethod
@@ -180,7 +183,7 @@ class ModelInput(BaseModel):
         非视频类 endpoint 保持 None。
         """
         from lib.custom_provider.duration_presets import infer_supported_durations
-        from lib.custom_provider.endpoints import endpoint_to_media_type
+        from lib.custom_provider.endpoints import endpoint_to_media_type, get_endpoint_spec
 
         d = self.model_dump()
         durations = self.supported_durations
@@ -192,6 +195,10 @@ class ModelInput(BaseModel):
             # endpoint 经 EndpointType 校验，值必在 ENDPOINT_REGISTRY 内，无需 ValueError 兜底
             durations = infer_supported_durations(self.model_id)
         d["supported_durations"] = json.dumps(durations) if durations is not None else None
+        # comfyui_workflow 只对接受模型级配置的 endpoint 落库（当前仅 comfyui-video）：
+        # 其余 endpoint 传值（前端切换 endpoint 后残留）静默剔除，避免把无关字段写进模型行。
+        if not get_endpoint_spec(self.endpoint).accepts_model_settings:
+            d["comfyui_workflow"] = None
         return d
 
 
@@ -253,6 +260,8 @@ class ModelResponse(BaseModel):
     system_capabilities: dict[str, object] | None = None
     # 用户覆盖（稀疏字典），与 system_capabilities 平凡合并即为生效值。
     capability_overrides: dict[str, object] | None = None
+    # ComfyUI 覆盖工作流（API-format 图 JSON）；仅 comfyui-video endpoint 非 None。
+    comfyui_workflow: dict[str, object] | None = None
     # 正在引用该模型的全局 system_settings 键名（如 default_video_backend_i2v）；未被引用为
     # None。只查 DB 全局配置，不扫描项目文件（`docs/adr/0054`）；前端据此渲染非阻塞提示。
     global_bucket_refs: list[str] | None = None
@@ -313,6 +322,9 @@ class EndpointDescriptor(BaseModel):
     # 该 endpoint 的执行层是否真的下传尾帧约束；仅 video 类有意义。前端据此收窄 last_frame
     # 覆盖控件里「强制开」的可选范围——否则用户只能撞上写入侧的 422 才知道这条路不通。
     end_image_capable: bool = False
+    # comfyui-video 的内置工作流模板图快照（template_key → API-format workflow）；其余 endpoint
+    # 恒为 None。前端 ComfyUI 工作流下拉的「按模板起步」选项来源（单一真相源在后端注册表）。
+    comfyui_builtin_templates: dict[str, dict[str, Any]] | None = None
 
 
 class EndpointCatalogResponse(BaseModel):
@@ -389,6 +401,7 @@ def _model_to_response(m, global_bucket_refs: list[str] | None = None) -> ModelR
     return ModelResponse(
         system_capabilities=_system_capabilities_for(m.endpoint, m.model_id),
         capability_overrides=_effective_overrides_for_response(m.endpoint, m.model_id, m.capability_overrides),
+        comfyui_workflow=m.comfyui_workflow,
         id=m.id,
         model_id=m.model_id,
         display_name=m.display_name,
@@ -538,6 +551,36 @@ def _check_model_capability_overrides(models: list[ModelInput], _t: Callable[...
         _check_capability_overrides(m.capability_overrides, m.endpoint, m.model_id, _t)
 
 
+def _check_comfyui_workflows(models: list[ModelInput], _t: Callable[..., str]) -> None:
+    """校验整批模型的 ComfyUI 覆盖工作流：仅 comfyui-video endpoint 接受，且须通过模板校验。
+
+    ``ModelInput.to_db_dict`` 已把非 comfyui-video endpoint 的 ``comfyui_workflow`` 静默剔除，
+    此处对仍持有值的行做两件事：非 comfyui-video endpoint 传值即 422（防止前端绕过后端静默丢
+    数据，把「我填了但没生效」变成可诊断的错误）；comfyui-video 的值交给
+    :func:`lib.video_backends.comfyui.validate_comfyui_workflows` 按内置模板口径校验（含
+    MiniMaxH3ReferenceToVideo + SaveVideo 节点、结构合法），校验失败 422。
+    """
+    from lib.custom_provider.endpoints import get_endpoint_spec
+    from lib.video_backends.comfyui import ComfyUIWorkflowError, validate_comfyui_workflows
+
+    for m in models:
+        workflow = m.comfyui_workflow
+        if workflow is None:
+            continue
+        if not get_endpoint_spec(m.endpoint).accepts_model_settings:
+            raise HTTPException(
+                status_code=422,
+                detail=_t("comfyui_workflow_endpoint_only", model_id=m.model_id, endpoint=m.endpoint),
+            )
+        try:
+            validate_comfyui_workflows([{"model": m.model_id, "workflow": workflow}])
+        except ComfyUIWorkflowError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=_t("comfyui_workflow_invalid", model_id=m.model_id, reason=str(exc)),
+            ) from exc
+
+
 def _check_unique_defaults(models: list[ModelInput], _t: Callable[..., str]) -> None:
     """校验默认模型互斥。
 
@@ -663,6 +706,7 @@ async def create_provider(
         _check_duplicate_model_ids(body.models, _t)
         _check_unique_defaults(body.models, _t)
         _check_model_capability_overrides(body.models, _t)
+        _check_comfyui_workflows(body.models, _t)
     repo = CustomProviderRepository(session)
     model_dicts = [m.to_db_dict() for m in body.models] if body.models else None
     provider = await repo.create_provider(
@@ -830,6 +874,7 @@ async def replace_models(
     _check_duplicate_model_ids(body.models, _t)
     _check_unique_defaults(body.models, _t)
     _check_model_capability_overrides(body.models, _t)
+    _check_comfyui_workflows(body.models, _t)
     repo = CustomProviderRepository(session)
     provider = await repo.get_provider(provider_id)
     if provider is None:

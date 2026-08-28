@@ -412,6 +412,20 @@ _BUILTIN_MODEL_BUILDERS: dict[str, Callable[..., dict[str, dict[str, Any]]]] = {
 }
 
 
+def build_builtin_template_snapshot(template_key: str) -> dict[str, dict[str, Any]]:
+    """把内置工作流模板构造成「结构快照」，供自定义模型覆盖工作流通道复用。
+
+    内置模板与内置模型一一对应（``BUILTIN_COMFYUI_MODELS`` 即模板键集）。构造时用空 prompt 与
+    默认时长/比例，得到一张未参数化的模板图；下游 :func:`build_configured_minimax_h3_workflow`
+    会在请求期注入 prompt / 分辨率 / 时长帧数 / seed / 参考素材，不改图结构。
+    未知模板键直接抛错（模板键来自内置常量，调用方传错即 bug，fail-fast）。
+    """
+    builder = _BUILTIN_MODEL_BUILDERS.get(template_key)
+    if builder is None:
+        raise ValueError(f"unknown comfyui builtin template: {template_key!r}")
+    return builder(prompt="", image_files=[], video_files=[], audio_files=[])
+
+
 def _find_node_by_class(
     workflow: dict[str, dict[str, Any]], class_type: str, *, error_message: str
 ) -> tuple[str, dict[str, Any]]:

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { API } from "@/api";
-import type { EndpointDescriptor, ImageCap, MediaType } from "@/types";
+import type { ComfyUIWorkflowGraph, EndpointDescriptor, ImageCap, MediaType } from "@/types";
 
 // ---------------------------------------------------------------------------
 // EndpointCatalog —— 自定义供应商 endpoint 元数据的 FE 端缓存。
@@ -23,6 +23,8 @@ interface EndpointCatalogState {
   endpointToImageCapabilities: Record<string, ImageCap[]>;
   /** key → 执行层是否下传尾帧约束（仅 video 类为 true）；决定 last_frame 覆盖能否强制开启。 */
   endpointToEndImageCapable: Record<string, boolean>;
+  /** key → comfyui-video 的内置工作流模板快照；仅 comfyui-video 有条目。 */
+  endpointToComfyuiTemplates: Record<string, Record<string, ComfyUIWorkflowGraph>>;
   loading: boolean;
   initialized: boolean;
   /** 短路：已初始化或加载中 → 直接 return；否则触发一次 refresh。 */
@@ -36,11 +38,13 @@ function deriveMaps(endpoints: EndpointDescriptor[]): {
   endpointPaths: Record<string, EndpointPath>;
   endpointToImageCapabilities: Record<string, ImageCap[]>;
   endpointToEndImageCapable: Record<string, boolean>;
+  endpointToComfyuiTemplates: Record<string, Record<string, ComfyUIWorkflowGraph>>;
 } {
   const endpointToMediaType: Record<string, MediaType> = {};
   const endpointPaths: Record<string, EndpointPath> = {};
   const endpointToImageCapabilities: Record<string, ImageCap[]> = {};
   const endpointToEndImageCapable: Record<string, boolean> = {};
+  const endpointToComfyuiTemplates: Record<string, Record<string, ComfyUIWorkflowGraph>> = {};
   for (const e of endpoints) {
     endpointToMediaType[e.key] = e.media_type;
     endpointPaths[e.key] = { method: e.request_method, path: e.request_path_template };
@@ -48,8 +52,17 @@ function deriveMaps(endpoints: EndpointDescriptor[]): {
       endpointToImageCapabilities[e.key] = e.image_capabilities;
     }
     endpointToEndImageCapable[e.key] = e.end_image_capable;
+    if (e.comfyui_builtin_templates) {
+      endpointToComfyuiTemplates[e.key] = e.comfyui_builtin_templates;
+    }
   }
-  return { endpointToMediaType, endpointPaths, endpointToImageCapabilities, endpointToEndImageCapable };
+  return {
+    endpointToMediaType,
+    endpointPaths,
+    endpointToImageCapabilities,
+    endpointToEndImageCapable,
+    endpointToComfyuiTemplates,
+  };
 }
 
 export const useEndpointCatalogStore = create<EndpointCatalogState>((set, get) => ({
@@ -58,6 +71,7 @@ export const useEndpointCatalogStore = create<EndpointCatalogState>((set, get) =
   endpointPaths: {},
   endpointToImageCapabilities: {},
   endpointToEndImageCapable: {},
+  endpointToComfyuiTemplates: {},
   loading: false,
   initialized: false,
 
@@ -71,14 +85,20 @@ export const useEndpointCatalogStore = create<EndpointCatalogState>((set, get) =
     set({ loading: true });
     try {
       const res = await API.listEndpointCatalog();
-      const { endpointToMediaType, endpointPaths, endpointToImageCapabilities, endpointToEndImageCapable } =
-        deriveMaps(res.endpoints);
+      const {
+        endpointToMediaType,
+        endpointPaths,
+        endpointToImageCapabilities,
+        endpointToEndImageCapable,
+        endpointToComfyuiTemplates,
+      } = deriveMaps(res.endpoints);
       set({
         endpoints: res.endpoints,
         endpointToMediaType,
         endpointPaths,
         endpointToImageCapabilities,
         endpointToEndImageCapable,
+        endpointToComfyuiTemplates,
         loading: false,
         initialized: true,
       });

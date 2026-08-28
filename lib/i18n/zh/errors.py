@@ -210,6 +210,8 @@ MESSAGES = {
         "模型 {model_id} 支持参考音频时 max_reference_audio_count 必须大于 0；"
         "如需关闭音色参考，请把 reference_audio_mode 覆盖为 none"
     ),
+    "comfyui_workflow_endpoint_only": ("模型 {model_id} 的 endpoint {endpoint} 不支持 ComfyUI 覆盖工作流配置"),
+    "comfyui_workflow_invalid": "模型 {model_id} 的 ComfyUI 覆盖工作流无效: {reason}",
     # Projects
     "unknown_style_template": "未知的风格模版: {template_id}",
     "ad_only_field": "{field} 仅广告/短片项目（content_mode=ad）可用",

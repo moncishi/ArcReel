@@ -9,6 +9,7 @@ import { uid } from "@/utils/id";
 import { errMsg } from "@/utils/async";
 import type {
   CapabilityOverrides,
+  ComfyUIWorkflowGraph,
   CustomProviderInfo,
   CustomProviderModelInput,
   DiscoveredModel,
@@ -27,6 +28,7 @@ import {
 } from "./customProviderHelpers";
 import { EndpointSelect } from "./EndpointSelect";
 import { CapabilityOverrideRow } from "./CapabilityOverrideRow";
+import { ComfyUIWorkflowRow } from "./ComfyUIWorkflowRow";
 import { ResolutionPicker } from "@/components/shared/ResolutionPicker";
 import { IMAGE_STANDARD_RESOLUTIONS, VIDEO_STANDARD_RESOLUTIONS } from "@/utils/provider-models";
 import {
@@ -75,6 +77,9 @@ interface ModelRow {
   resolution: string; // 空串 = null
   supported_durations_text: string; // 用户原始文本，提交前 parse；空串 = 让后端按 preset 兜底
   capability_overrides: CapabilityOverrides | null;
+  // ComfyUI 覆盖工作流图（API-format JSON）；仅 comfyui-video endpoint 有意义，其余恒为 null。
+  // null = 未配置覆盖（内置模型跟随内置模板，自定义模型后端会拒绝）。
+  comfyui_workflow: ComfyUIWorkflowGraph | null;
   // 系统按 (endpoint, model_id) 判定的能力，只读展示用；null = 非视频模型，或该行尚未落库
   // （新增/改过 model_id 的行判定要后端算，前端不猜），此时控件只显示「待判定」。
   system_capabilities: VideoCapabilityFlags | null;
@@ -105,6 +110,7 @@ function newModelRow(partial?: Partial<ModelRow>): ModelRow {
     resolution: "",
     supported_durations_text: "",
     capability_overrides: null,
+    comfyui_workflow: null,
     system_capabilities: null,
     global_bucket_refs: [],
     ...partial,
@@ -143,6 +149,7 @@ function existingToRow(m: CustomProviderInfo["models"][number]): ModelRow {
     resolution: m.resolution ?? "",
     supported_durations_text: m.supported_durations ? compactRangeFormat(m.supported_durations) : "",
     capability_overrides: m.capability_overrides,
+    comfyui_workflow: m.comfyui_workflow,
     system_capabilities: m.system_capabilities,
     global_bucket_refs: m.global_bucket_refs ?? [],
   });
@@ -167,6 +174,7 @@ function rowToInput(r: ModelRow): CustomProviderModelInput {
     ...(r.resolution ? { resolution: r.resolution } : { resolution: null }),
     ...(supported_durations ? { supported_durations } : { supported_durations: null }),
     capability_overrides: r.capability_overrides,
+    comfyui_workflow: r.comfyui_workflow,
   };
 }
 
@@ -303,6 +311,7 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
   const endpointToMediaType = useEndpointCatalogStore((s) => s.endpointToMediaType);
   const endpointToImageCapabilities = useEndpointCatalogStore((s) => s.endpointToImageCapabilities);
   const endpointToEndImageCapable = useEndpointCatalogStore((s) => s.endpointToEndImageCapable);
+  const endpointToComfyuiTemplates = useEndpointCatalogStore((s) => s.endpointToComfyuiTemplates);
   const fetchEndpointCatalog = useEndpointCatalogStore((s) => s.fetch);
   useEffect(() => {
     void fetchEndpointCatalog();
@@ -427,6 +436,19 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
       showError(t("enabled_model_needs_id"));
       return;
     }
+    // ComfyUI 自定义模型（非内置模板键）必须有覆盖工作流：后端构造期 fail-loud，
+    // 前端先拦截给出可操作的提示，而不是等保存后 422。
+    const builtinComfyuiModels = Object.keys(endpointToComfyuiTemplates["comfyui-video"] ?? {});
+    const comfyuiMissingWorkflow = enabledModels.find(
+      (m) =>
+        m.endpoint === "comfyui-video" &&
+        !builtinComfyuiModels.includes(m.model_id.trim()) &&
+        !m.comfyui_workflow,
+    );
+    if (comfyuiMissingWorkflow) {
+      showError(t("comfyui_workflow_required", { model_id: comfyuiMissingWorkflow.model_id }));
+      return;
+    }
     // 在拼装 payload 前显式校验所有行的 supported_durations 格式：失败则阻断保存，
     // 让用户回去修正标红字段；不再让 rowToInput 静默把非法降级为 null
     let payloadModels: CustomProviderModelInput[];
@@ -492,6 +514,7 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
     imageMaxWorkers,
     videoMaxWorkers,
     audioMaxWorkers,
+    endpointToComfyuiTemplates,
     isEdit,
     existing,
     onSaved,
@@ -855,6 +878,18 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
                             capability_overrides: withLastFrameOverride(m.capability_overrides, next),
                           })
                         }
+                      />
+                    )}
+
+                    {/* ComfyUI 工作流配置行（仅 comfyui-video endpoint） */}
+                    {m.endpoint === "comfyui-video" && (
+                      <ComfyUIWorkflowRow
+                        value={m.comfyui_workflow}
+                        builtinTemplates={endpointToComfyuiTemplates["comfyui-video"] ?? {}}
+                        isBuiltinModel={Object.keys(endpointToComfyuiTemplates["comfyui-video"] ?? {}).includes(
+                          m.model_id.trim(),
+                        )}
+                        onChange={(next) => updateModel(m.key, { comfyui_workflow: next })}
                       />
                     )}
                   </div>

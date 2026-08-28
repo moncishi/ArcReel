@@ -223,6 +223,7 @@ class TestEndpointCatalog:
             "minimax-video",
             "kling-image",
             "kling-video",
+            "comfyui-video",
             "openai-tts",
         }
 
@@ -242,6 +243,7 @@ class TestEndpointCatalog:
                 "request_path_template",
                 "image_capabilities",
                 "end_image_capable",
+                "comfyui_builtin_templates",
             }
             assert entry["request_method"] == "POST"
             assert entry["request_path_template"].startswith("/")
@@ -1837,3 +1839,112 @@ class TestSupportedDurationsAutoFill:
         resp = custom_providers_client.get(f"/api/v1/custom-providers/{provider_id}")
         model = resp.json()["models"][0]
         assert model["supported_durations"] is None
+
+
+class TestComfyUIWorkflow:
+    """comfyui-video 模型行的覆盖工作流：保存校验 + 回显 + 非 comfyui 端点剔除。"""
+
+    def _valid_workflow(self) -> dict[str, Any]:
+        from lib.custom_provider.endpoints import COMFYUI_BUILTIN_TEMPLATES
+
+        return COMFYUI_BUILTIN_TEMPLATES["minimax-h3-ref2va"]
+
+    def test_create_comfyui_provider_with_workflow(self, custom_providers_client: TestClient):
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "ComfyUI",
+                "discovery_format": "openai",
+                "base_url": "http://localhost:8188",
+                "api_key": "sk-comfyui",
+                "models": [
+                    {
+                        "model_id": "my-local-h3",
+                        "display_name": "My Local H3",
+                        "endpoint": "comfyui-video",
+                        "is_default": True,
+                        "is_enabled": True,
+                        "comfyui_workflow": self._valid_workflow(),
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        model = resp.json()["models"][0]
+        assert model["comfyui_workflow"] is not None
+
+    def test_invalid_workflow_rejected_422(self, custom_providers_client: TestClient):
+        bad = {"92": {"class_type": "SaveVideo", "inputs": {"filename_prefix": "x"}}}
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "ComfyUI",
+                "discovery_format": "openai",
+                "base_url": "http://localhost:8188",
+                "api_key": "sk-comfyui",
+                "models": [
+                    {
+                        "model_id": "my-model",
+                        "display_name": "My Model",
+                        "endpoint": "comfyui-video",
+                        "is_default": True,
+                        "is_enabled": True,
+                        "comfyui_workflow": bad,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422
+        assert "无效" in resp.json()["detail"] or "invalid" in resp.json()["detail"]
+
+    def test_workflow_on_non_comfyui_endpoint_rejected(self, custom_providers_client: TestClient):
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "Relay",
+                "discovery_format": "openai",
+                "base_url": "https://relay.test/v1",
+                "api_key": "sk-relay",
+                "models": [
+                    {
+                        "model_id": "sora-2",
+                        "display_name": "Sora 2",
+                        "endpoint": "openai-video",
+                        "is_default": True,
+                        "is_enabled": True,
+                        "comfyui_workflow": self._valid_workflow(),
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422
+
+    def test_non_comfyui_create_has_no_workflow_field(self, custom_providers_client: TestClient):
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "Relay",
+                "discovery_format": "openai",
+                "base_url": "https://relay.test/v1",
+                "api_key": "sk-relay",
+                "models": [
+                    {
+                        "model_id": "sora-2",
+                        "display_name": "Sora 2",
+                        "endpoint": "openai-video",
+                        "is_default": True,
+                        "is_enabled": True,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["models"][0]["comfyui_workflow"] is None
+
+    def test_catalog_includes_comfyui_video(self, custom_providers_client: TestClient):
+        resp = custom_providers_client.get("/api/v1/custom-providers/endpoints")
+        by_key = {e["key"]: e for e in resp.json()["endpoints"]}
+        entry = by_key["comfyui-video"]
+        assert entry["media_type"] == "video"
+        assert entry["end_image_capable"] is False
+        assert entry["image_capabilities"] is None

@@ -35,6 +35,7 @@ class TestRegistry:
             "minimax-video",
             "kling-image",
             "kling-video",
+            "comfyui-video",
             "openai-tts",
         }
 
@@ -42,7 +43,18 @@ class TestRegistry:
         for key, spec in ENDPOINT_REGISTRY.items():
             assert spec.key == key
             assert spec.media_type in {"text", "image", "video", "audio"}
-            assert spec.family in {"openai", "google", "newapi", "v2", "ark", "vidu", "dashscope", "minimax", "kling"}
+            assert spec.family in {
+                "openai",
+                "google",
+                "newapi",
+                "v2",
+                "ark",
+                "vidu",
+                "dashscope",
+                "minimax",
+                "kling",
+                "comfyui",
+            }
             # 注册表里的都是内置端点，来源恒为 builtin；用户端点不进注册表，由 ce- 键现构造。
             assert spec.source == "builtin"
             # 显示名两种来源恰有其一：Python 内置走 i18n key，声明式端点走定义里的 meta.name。
@@ -76,10 +88,12 @@ class TestRegistry:
             "video_max_reference_images": None,
             "end_image_capable": False,
             "reference_audio_capable": False,
+            # 非 comfyui-video endpoint 不携带内置模板快照
+            "comfyui_builtin_templates": None,
         }
 
     def test_new_video_endpoints_have_unset_cap(self):
-        """v2/ark/vidu/dashscope/minimax/kling 不在 endpoint 维度声明上限，由 resolver 调 backend 纯 caps 函数读取。"""
+        """v2/ark/vidu/dashscope/minimax/kling/comfyui 不在 endpoint 维度声明上限，由 resolver 调 backend 纯 caps 函数读取。"""
         for key in (
             "v2-video-generations",
             "ark-seedance",
@@ -87,6 +101,7 @@ class TestRegistry:
             "dashscope-async-video",
             "minimax-video",
             "kling-video",
+            "comfyui-video",
         ):
             assert ENDPOINT_REGISTRY[key].video_max_reference_images is None
         # 既有显式 int 保留，行为零变化
@@ -107,6 +122,7 @@ class TestRegistry:
             "dashscope-async-video",
             "minimax-video",
             "kling-video",
+            "comfyui-video",
         ):
             assert ENDPOINT_REGISTRY[key].video_caps_for_model is not None
         # 显式 int 的 video endpoint 不应再绑 caps 函数
@@ -160,6 +176,40 @@ class TestRegistry:
             assert unknown.max_reference_images == 0
             assert unknown.max_reference_images == 0
 
+    def test_comfyui_caps_fn_reads_per_model_limit_without_client(self):
+        """comfyui-video 的 caps_fn 是纯函数：内置模型与任意自定义模型共享同一份 H3 模板容量
+        （参考图 9 / 参考音频 3 / 首帧可用 / 无尾帧 / 恒有声），resolver 据此解析而无需构造
+        backend / base_url。"""
+        caps_fn = ENDPOINT_REGISTRY["comfyui-video"].video_caps_for_model
+        assert caps_fn is not None
+        builtin = caps_fn("minimax-h3-ref2va")
+        assert builtin.first_frame is True
+        assert builtin.last_frame is False
+        assert builtin.max_reference_images == 9
+        assert builtin.max_reference_audio_count == 3
+        custom = caps_fn("my-local-model")
+        assert custom.max_reference_images == 9
+
+    def test_comfyui_template_name_keys_have_frontend_i18n(self):
+        """comfyui-video 内置模板的显示名 key 必须在 frontend dashboard 三语里都有译文。
+
+        模板键与内置模型一一对应（BUILTIN_COMFYUI_MODELS），key 派生规则（- → _）与
+        后端 COMFYUI_TEMPLATE_NAME_KEYS 一致；若内置模板增删，这里会立刻暴露漏翻。
+        """
+        import re
+        from pathlib import Path
+
+        from lib.custom_provider.endpoints import COMFYUI_TEMPLATE_NAME_KEYS
+
+        repo_root = Path(__file__).resolve().parents[4]
+        # key 派生规则与后端一致：模板键（内置模型名）中 "-" → "_"，前缀 comfyui_workflow_template_
+        expected = {f"comfyui_workflow_template_{key.replace('-', '_')}" for key in COMFYUI_TEMPLATE_NAME_KEYS}
+        for locale in ("zh", "en", "vi"):
+            text = (repo_root / "frontend" / "src" / "i18n" / locale / "dashboard.ts").read_text(encoding="utf-8")
+            present = set(re.findall(r"""['"](comfyui_workflow_template_[a-z0-9_]+)['"]\s*:""", text))
+            missing = expected - present
+            assert not missing, f"{locale} dashboard 缺少 ComfyUI 模板显示名: {sorted(missing)}"
+
     def test_negative_int_cap_rejected_at_validation(self):
         """import 期不变式拒绝负数 int cap：下游 references[:-1] 会误丢最后一张而非裁成 0 张。"""
         import dataclasses
@@ -195,7 +245,7 @@ class TestRegistry:
     def test_audio_capable_endpoints_match_backends_that_send_audio(self):
         """运输声明与 backend 实现同步：声明 True 的 endpoint 必须真的组装参考音频。"""
         audio_capable = {k for k, s in ENDPOINT_REGISTRY.items() if s.reference_audio_capable}
-        assert audio_capable == {"ark-seedance", "dashscope-async-video"}
+        assert audio_capable == {"ark-seedance", "dashscope-async-video", "comfyui-video"}
 
     def test_audio_endpoint_spec(self):
         spec = ENDPOINT_REGISTRY["openai-tts"]
@@ -232,6 +282,7 @@ class TestRegistry:
             "dashscope-async-video",
             "minimax-video",
             "kling-video",
+            "comfyui-video",
         }
 
 
