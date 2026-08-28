@@ -45,6 +45,7 @@ import type {
   DiscoveredModel,
   EndpointDescriptor,
   CustomProviderCredentials,
+  ComfyUIConnectionTestResult,
   AnthropicDiscoverRequest,
   AnthropicDiscoverResponse,
   CostEstimateResponse,
@@ -2689,6 +2690,11 @@ class API {
 
   static async getCustomProviderCredentials(id: number): Promise<CustomProviderCredentials> {
     return this.request(`/custom-providers/${id}/credentials`);
+  }
+
+  /** ComfyUI 供应商连通性测试：后端代理探测各主机（GET /system_stats + /queue）。 */
+  static async testComfyUIConnection(id: number): Promise<ComfyUIConnectionTestResult> {
+    return this.request(`/custom-providers/${id}/test`, { method: "POST" });
   }
 
   static async discoverAnthropicModels(
