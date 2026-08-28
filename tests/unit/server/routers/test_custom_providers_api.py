@@ -1948,3 +1948,167 @@ class TestComfyUIWorkflow:
         assert entry["media_type"] == "video"
         assert entry["end_image_capable"] is False
         assert entry["image_capabilities"] is None
+
+
+class TestComfyUIConnectionTest:
+    """ComfyUI 供应商连通性测试（POST /{provider_id}/test 走 ComfyUI 探测分支）。
+
+    浏览器不能直连 ComfyUI 主机（CORS），由后端代理探测：GET /system_stats 成功即视为可达，
+    随后 GET /queue 取负载。验收标准「GET /system_stats 成功返回版本/设备信息即视为可达」。
+    """
+
+    def _create_comfyui_provider(self, custom_providers_client: TestClient, base_url: str = "http://gpu-1:8188") -> int:
+        from lib.custom_provider.endpoints import COMFYUI_BUILTIN_TEMPLATES
+
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "ComfyUI Pool",
+                "discovery_format": "openai",
+                "base_url": base_url,
+                "api_key": "sk-comfyui",
+                "models": [
+                    {
+                        "model_id": "my-local-h3",
+                        "display_name": "My Local H3",
+                        "endpoint": "comfyui-video",
+                        "is_default": True,
+                        "is_enabled": True,
+                        "comfyui_workflow": COMFYUI_BUILTIN_TEMPLATES["minimax-h3-ref2va"],
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()["id"]
+
+    def _create_openai_provider(self, custom_providers_client: TestClient) -> int:
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers",
+            json={
+                "display_name": "OpenAI Relay",
+                "discovery_format": "openai",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "sk-relay",
+                "models": [{"model_id": "gpt-4o", "display_name": "GPT-4o", "endpoint": "openai-chat"}],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()["id"]
+
+    @staticmethod
+    def _stats_payload(device: str = "NVIDIA RTX 4090", version: str = "0.3.50") -> dict:
+        return {
+            "system": {
+                "comfyui_version": version,
+                "device_name": device,
+                "python_version": "3.12.4",
+                "torch_version": "2.3.0",
+            },
+            "devices": [{"name": device, "type": "cuda", "vram_total": 25139646464}],
+        }
+
+    @staticmethod
+    def _queue_payload(running: int = 0, pending: int = 0) -> dict:
+        return {
+            "queue_running": [[i, f"running-{i}"] for i in range(running)],
+            "queue_pending": [[i, f"pending-{i}"] for i in range(pending)],
+        }
+
+    def test_reachable_host_returns_stats_and_load(self, custom_providers_client: TestClient):
+        pid = self._create_comfyui_provider(custom_providers_client)
+        with capture_http(assert_all_called=True) as http:
+            http.get("http://gpu-1:8188/system_stats").respond(json=self._stats_payload())
+            http.get("http://gpu-1:8188/queue").respond(json=self._queue_payload(running=1, pending=2))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert len(body["nodes"]) == 1
+        node = body["nodes"][0]
+        assert node["reachable"] is True
+        assert node["device"] == "NVIDIA RTX 4090"
+        assert node["version"] == "0.3.50"
+        assert node["running"] == 1
+        assert node["pending"] == 2
+        assert node["error"] is None
+
+    def test_multiple_hosts_probed_concurrently(self, custom_providers_client: TestClient):
+        pid = self._create_comfyui_provider(custom_providers_client, base_url="http://gpu-1:8188\nhttp://gpu-2:8188")
+        with capture_http(assert_all_called=True) as http:
+            http.get("http://gpu-1:8188/system_stats").respond(json=self._stats_payload(device="gpu-1"))
+            http.get("http://gpu-1:8188/queue").respond(json=self._queue_payload(running=0, pending=0))
+            http.get("http://gpu-2:8188/system_stats").respond(json=self._stats_payload(device="gpu-2"))
+            http.get("http://gpu-2:8188/queue").respond(json=self._queue_payload(running=1, pending=1))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert {n["base_url"] for n in body["nodes"]} == {"http://gpu-1:8188", "http://gpu-2:8188"}
+        by_url = {n["base_url"]: n for n in body["nodes"]}
+        assert by_url["http://gpu-2:8188"]["running"] == 1
+        assert by_url["http://gpu-2:8188"]["pending"] == 1
+
+    def test_unreachable_host_marks_error(self, custom_providers_client: TestClient):
+        pid = self._create_comfyui_provider(custom_providers_client)
+        with capture_http(assert_all_called=True) as http:
+            http.get("http://gpu-1:8188/system_stats").mock(side_effect=httpx.ConnectError("Connection refused"))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is False
+        node = body["nodes"][0]
+        assert node["reachable"] is False
+        assert node["device"] is None
+        assert node["error"] is not None
+
+    def test_partial_reachability_reports_partial(self, custom_providers_client: TestClient):
+        pid = self._create_comfyui_provider(custom_providers_client, base_url="http://gpu-1:8188\nhttp://gpu-2:8188")
+        with capture_http() as http:
+            http.get("http://gpu-1:8188/system_stats").respond(json=self._stats_payload())
+            http.get("http://gpu-1:8188/queue").respond(json=self._queue_payload())
+            http.get("http://gpu-2:8188/system_stats").mock(side_effect=httpx.ConnectError("Connection refused"))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["nodes"][0]["reachable"] is True
+        assert body["nodes"][1]["reachable"] is False
+
+    def test_queue_failure_keeps_host_reachable(self, custom_providers_client: TestClient):
+        """/queue 探测失败（精简版 ComfyUI 无该端点）只丢弃负载，不影响可达判定。"""
+        pid = self._create_comfyui_provider(custom_providers_client)
+        with capture_http() as http:
+            http.get("http://gpu-1:8188/system_stats").respond(json=self._stats_payload())
+            http.get("http://gpu-1:8188/queue").mock(side_effect=httpx.ConnectError("no queue"))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        node = body["nodes"][0]
+        assert node["reachable"] is True
+        assert node["running"] is None
+        assert node["pending"] is None
+
+    def test_openai_provider_still_uses_openai_probe(self, custom_providers_client: TestClient):
+        """非 ComfyUI 供应商走原有 openai 探测分支（回归：不改变既有连接测试语义）。"""
+        pid = self._create_openai_provider(custom_providers_client)
+        with capture_http(assert_all_called=True) as http:
+            http.get("https://api.example.com/v1/models").respond(json=_openai_models_page(3))
+            resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["model_count"] == 3
+
+    def test_returns_404_for_nonexistent(self, custom_providers_client: TestClient):
+        resp = custom_providers_client.post("/api/v1/custom-providers/99999/test")
+        assert resp.status_code == 404
+
+    def test_invalid_base_url_returns_false(self, custom_providers_client: TestClient):
+        pid = self._create_comfyui_provider(custom_providers_client, base_url="not-a-url")
+        resp = custom_providers_client.post(f"/api/v1/custom-providers/{pid}/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is False
+        assert body["nodes"] == []

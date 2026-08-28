@@ -237,6 +237,11 @@ MESSAGES = {
         "Endpoint {endpoint} of model {model_id} does not support ComfyUI override workflow configuration"
     ),
     "comfyui_workflow_invalid": "ComfyUI override workflow of model {model_id} is invalid: {reason}",
+    "comfyui_connection_invalid_url": "Invalid ComfyUI host address: {err_msg}",
+    "comfyui_connection_no_host": "No ComfyUI host address configured",
+    "comfyui_connection_success": "ComfyUI connection successful, {node_count} host(s) reachable",
+    "comfyui_connection_partial": "ComfyUI partially reachable ({reachable_count}/{total_count} hosts)",
+    "comfyui_connection_failed": "All ComfyUI hosts unreachable",
     # Projects
     "unknown_style_template": "Unknown style template: {template_id}",
     "ad_only_field": "{field} is only available for ad/short-video projects (content_mode=ad)",

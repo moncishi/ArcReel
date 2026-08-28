@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -284,6 +285,37 @@ class ConnectionTestResponse(BaseModel):
     success: bool
     message: str
     model_count: int = 0
+
+
+class ComfyUINodeTestResult(BaseModel):
+    """ComfyUI 主机连通性测试的单节点结果（GET /system_stats 成功即视为可达）。"""
+
+    base_url: str
+    reachable: bool
+    # ComfyUI /system_stats 的设备信息（system.device_name 等）；不可达时为 None。
+    device: str | None = None
+    # ComfyUI /system_stats 的系统信息（system.comfyui_version 等）；不可达时为 None。
+    version: str | None = None
+    # 当前队列在途任务数（GET /queue 的 running + pending）；不可达时为 None。
+    running: int | None = None
+    pending: int | None = None
+    # 探测失败原因；可达时为 None。
+    error: str | None = None
+
+    @property
+    def load(self) -> int | None:
+        """在途任务数（running + pending）；任一缺失即 None（不可达/队列探测失败）。"""
+        if self.running is None or self.pending is None:
+            return None
+        return self.running + self.pending
+
+
+class ComfyUIConnectionTestResponse(BaseModel):
+    """ComfyUI 供应商的连通性测试结果：每个 base_url（主机）一条状态。"""
+
+    success: bool
+    message: str
+    nodes: list[ComfyUINodeTestResult] = []
 
 
 class DiscoverResponse(BaseModel):
@@ -979,7 +1011,99 @@ async def test_connection_by_id(provider_id: int, _t: Translator, session: Async
     provider = await repo.get_provider(provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail=_t("provider_not_found"))
+    if await _provider_is_comfyui(repo, provider_id):
+        return await _run_comfyui_connection_test(provider.base_url, provider.api_key, _t)
     return await _run_connection_test(provider.discovery_format, provider.base_url, provider.api_key, _t)
+
+
+async def _provider_is_comfyui(repo: CustomProviderRepository, provider_id: int) -> bool:
+    """该供应商是否为 ComfyUI 池：任一模型使用 comfyui-video endpoint。"""
+    models = await repo.list_models(provider_id)
+    return any(m.endpoint == "comfyui-video" for m in models)
+
+
+def _probe_error_text(exc: Exception) -> str:
+    """探测失败的错误摘要：截断到 200 字符，避免把超长异常串回给前端。"""
+    err_msg = str(exc)
+    if len(err_msg) > 200:
+        err_msg = err_msg[:200] + "..."
+    return err_msg or "连接失败"
+
+
+async def _probe_comfyui_host(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+) -> ComfyUINodeTestResult:
+    """探测单个 ComfyUI 主机：GET /system_stats（可达 + 设备/版本），随后 GET /queue（负载）。
+
+    可达性以 /system_stats 为准（符合验收标准「GET /system_stats 成功返回版本/设备信息即视为
+    可达」）；/queue 探测失败（如精简版 ComfyUI 无该端点）只丢弃负载，不影响可达判定。
+    """
+    try:
+        stats_resp = await client.get(f"{base_url}/system_stats", headers=headers)
+        stats_resp.raise_for_status()
+        stats = stats_resp.json()
+    except Exception as exc:
+        return ComfyUINodeTestResult(base_url=base_url, reachable=False, error=_probe_error_text(exc))
+    system = stats.get("system") or {}
+    running: int | None = None
+    pending: int | None = None
+    try:
+        queue_resp = await client.get(f"{base_url}/queue", headers=headers)
+        queue_resp.raise_for_status()
+        queue = queue_resp.json()
+        running = len(queue["queue_running"]) if isinstance(queue.get("queue_running"), list) else 0
+        pending = len(queue["queue_pending"]) if isinstance(queue.get("queue_pending"), list) else 0
+    except Exception:
+        running = None
+        pending = None
+    return ComfyUINodeTestResult(
+        base_url=base_url,
+        reachable=True,
+        device=system.get("device_name"),
+        version=system.get("comfyui_version"),
+        running=running,
+        pending=pending,
+    )
+
+
+async def _run_comfyui_connection_test(
+    base_url: str,
+    api_key: str,
+    _t: Callable[..., str],
+    *,
+    probe: Callable[..., Awaitable[ComfyUINodeTestResult]] | None = None,
+) -> ComfyUIConnectionTestResponse:
+    """共用的 ComfyUI 连通性测试逻辑：并发探测每个 base_url（主机）并汇总可达/负载。"""
+    from lib.custom_provider.comfyui_scheduler import parse_comfyui_base_urls
+
+    try:
+        urls = parse_comfyui_base_urls(base_url)
+    except ValueError as exc:
+        return ComfyUIConnectionTestResponse(
+            success=False, message=_t("comfyui_connection_invalid_url", err_msg=str(exc))
+        )
+    if not urls:
+        return ComfyUIConnectionTestResponse(success=False, message=_t("comfyui_connection_no_host"))
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    probe_fn = probe or _probe_comfyui_host
+    async with httpx.AsyncClient(timeout=_CONNECTION_TEST_TIMEOUT) as client:
+        results = await asyncio.gather(*(probe_fn(client, url, headers) for url in urls))
+    reachable = [r for r in results if r.reachable]
+    if len(reachable) == len(results):
+        return ComfyUIConnectionTestResponse(
+            success=True,
+            message=_t("comfyui_connection_success", node_count=len(reachable)),
+            nodes=list(results),
+        )
+    if reachable:
+        return ComfyUIConnectionTestResponse(
+            success=True,
+            message=_t("comfyui_connection_partial", reachable_count=len(reachable), total_count=len(results)),
+            nodes=list(results),
+        )
+    return ComfyUIConnectionTestResponse(success=False, message=_t("comfyui_connection_failed"), nodes=list(results))
 
 
 async def _run_discover(

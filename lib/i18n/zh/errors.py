@@ -212,6 +212,11 @@ MESSAGES = {
     ),
     "comfyui_workflow_endpoint_only": ("模型 {model_id} 的 endpoint {endpoint} 不支持 ComfyUI 覆盖工作流配置"),
     "comfyui_workflow_invalid": "模型 {model_id} 的 ComfyUI 覆盖工作流无效: {reason}",
+    "comfyui_connection_invalid_url": "ComfyUI 主机地址无效: {err_msg}",
+    "comfyui_connection_no_host": "未配置 ComfyUI 主机地址",
+    "comfyui_connection_success": "ComfyUI 连接成功，{node_count} 台主机可达",
+    "comfyui_connection_partial": "ComfyUI 部分主机可达（{reachable_count}/{total_count}）",
+    "comfyui_connection_failed": "ComfyUI 全部主机不可达",
     # Projects
     "unknown_style_template": "未知的风格模版: {template_id}",
     "ad_only_field": "{field} 仅广告/短片项目（content_mode=ad）可用",
