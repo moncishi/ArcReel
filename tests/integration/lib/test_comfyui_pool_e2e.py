@@ -551,7 +551,10 @@ async def test_execute_video_task_pool_branch_pins_host_and_exempts_dispatch_che
         )
 
     monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-    monkeypatch.setattr("lib.custom_provider.comfyui_pool.select_pool_host", _fake_select)
+    # 池任务分支里 select_pool_host 是 generation_tasks 的模块级 import；patch 调用方的
+    # 命名空间而非被测 module（comfyui_pool）自身的公共入口，满足 audit_tests 的
+    # INTEG-SELF-PATCH 纪律（integration 用例不 patch 被测 module 的公共入口）。
+    monkeypatch.setattr(generation_tasks, "select_pool_host", _fake_select)
     monkeypatch.setattr(generation_tasks, "resolve_generation_context", _fake_resolve)
     monkeypatch.setattr(generation_tasks, "extract_video_thumbnail", _async_return(False))
     monkeypatch.setattr(generation_tasks, "emit_generation_success_batch", lambda **kw: None)
