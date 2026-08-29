@@ -103,6 +103,12 @@
       "skillPath": "skills/engineering/resolving-merge-conflicts/SKILL.md",
       "computedHash": "63b2dcadbe9124caeb3448f1378286fe18dcefb2494f60e136831b8b4986ca27"
     },
+    "setup-arcreel-skills": {
+      "source": "ArcReel/skills",
+      "sourceType": "github",
+      "skillPath": "skills/setup-arcreel-skills/SKILL.md",
+      "computedHash": "a4aff709baab560f30567817e46287a28dffc16619a3c81aa621f3744d73dc9f"
+    },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -156,6 +162,12 @@
       "sourceType": "github",
       "skillPath": "skills/react-best-practices/SKILL.md",
       "computedHash": "ca7b0c0c6e5f2750043f7f0cd72d16ac4e2abc48f9b5500d047a4b77a2506212"
+    },
+    "video-workflow": {
+      "source": "ArcReel/skills",
+      "sourceType": "github",
+      "skillPath": "skills/video-workflow/SKILL.md",
+      "computedHash": "804f9ae05d556e992ff7ee23a3417b2b09d8db0ca4b258932b111735c1a655e2"
     },
     "wait-what": {
       "source": "mattpocock/skills",

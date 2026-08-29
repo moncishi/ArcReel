@@ -128,3 +128,9 @@ docs/verification-reports/
 .impeccable/live/deferred-svelte-component-accepts.json
 .impeccable/live/*.png
 # impeccable-ignore-end
+
+# OMC orchestration runtime state
+.omo/
+
+# Local experiments (opencode backend POC)
+poc_opencode_backend/
